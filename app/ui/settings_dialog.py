@@ -1,0 +1,248 @@
+"""
+Settings Dialog.
+Application settings configuration dialog.
+"""
+
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
+    QSpinBox, QDoubleSpinBox, QPushButton, QTabWidget,
+    QWidget, QCheckBox, QDialogButtonBox, QMessageBox
+)
+from PyQt6.QtCore import Qt
+
+from app.config import get_config
+
+
+class SettingsDialog(QDialog):
+    """Dialog for configuring application settings."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.config = get_config()
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(500)
+        self.setModal(True)
+        self._setup_ui()
+        self._load_settings()
+        
+    def _setup_ui(self):
+        """Setup the dialog UI."""
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        
+        # Tab widget for categories
+        tabs = QTabWidget()
+        
+        # Classroom settings tab
+        classroom_tab = QWidget()
+        classroom_layout = QVBoxLayout(classroom_tab)
+        
+        classroom_group = QGroupBox("Classroom Analysis Defaults")
+        classroom_form = QVBoxLayout(classroom_group)
+        
+        # Probe Duration
+        probe_dur_layout = QHBoxLayout()
+        probe_dur_layout.addWidget(QLabel("Default Probe Duration:"))
+        self.probe_duration_spin = QSpinBox()
+        self.probe_duration_spin.setRange(60, 1800)
+        self.probe_duration_spin.setSuffix(" sec")
+        probe_dur_layout.addWidget(self.probe_duration_spin)
+        probe_dur_layout.addStretch()
+        classroom_form.addLayout(probe_dur_layout)
+        
+        # Probe Interval
+        probe_int_layout = QHBoxLayout()
+        probe_int_layout.addWidget(QLabel("Default Probe Interval:"))
+        self.probe_interval_spin = QSpinBox()
+        self.probe_interval_spin.setRange(300, 7200)
+        self.probe_interval_spin.setSuffix(" sec")
+        probe_int_layout.addWidget(self.probe_interval_spin)
+        probe_int_layout.addStretch()
+        classroom_form.addLayout(probe_int_layout)
+        
+        # Frame Skip
+        frame_skip_layout = QHBoxLayout()
+        frame_skip_layout.addWidget(QLabel("Default Frame Skip:"))
+        self.frame_skip_spin = QSpinBox()
+        self.frame_skip_spin.setRange(1, 10)
+        frame_skip_layout.addWidget(self.frame_skip_spin)
+        frame_skip_layout.addStretch()
+        classroom_form.addLayout(frame_skip_layout)
+        
+        # Similarity Threshold
+        sim_layout = QHBoxLayout()
+        sim_layout.addWidget(QLabel("Default Similarity Threshold:"))
+        self.similarity_spin = QDoubleSpinBox()
+        self.similarity_spin.setRange(0.5, 1.0)
+        self.similarity_spin.setSingleStep(0.05)
+        self.similarity_spin.setDecimals(2)
+        sim_layout.addWidget(self.similarity_spin)
+        sim_layout.addStretch()
+        classroom_form.addLayout(sim_layout)
+        
+        # Max Time Gap
+        time_gap_layout = QHBoxLayout()
+        time_gap_layout.addWidget(QLabel("Max Time Gap (stitching):"))
+        self.max_time_gap_spin = QSpinBox()
+        self.max_time_gap_spin.setRange(60, 1800)
+        self.max_time_gap_spin.setSuffix(" sec")
+        time_gap_layout.addWidget(self.max_time_gap_spin)
+        time_gap_layout.addStretch()
+        classroom_form.addLayout(time_gap_layout)
+        
+        # Max Pixel Distance
+        pixel_dist_layout = QHBoxLayout()
+        pixel_dist_layout.addWidget(QLabel("Max Pixel Distance (stitching):"))
+        self.max_pixel_dist_spin = QSpinBox()
+        self.max_pixel_dist_spin.setRange(50, 500)
+        self.max_pixel_dist_spin.setSuffix(" px")
+        pixel_dist_layout.addWidget(self.max_pixel_dist_spin)
+        pixel_dist_layout.addStretch()
+        classroom_form.addLayout(pixel_dist_layout)
+        
+        classroom_layout.addWidget(classroom_group)
+        classroom_layout.addStretch()
+        
+        tabs.addTab(classroom_tab, "Classroom")
+        
+        # Cross-day settings tab
+        crossday_tab = QWidget()
+        crossday_layout = QVBoxLayout(crossday_tab)
+        
+        crossday_group = QGroupBox("Attendance Defaults")
+        crossday_form = QVBoxLayout(crossday_group)
+        
+        # T_STRICT_MERGE
+        strict_layout = QHBoxLayout()
+        strict_layout.addWidget(QLabel("Strict Merge Threshold:"))
+        self.t_strict_merge_spin = QDoubleSpinBox()
+        self.t_strict_merge_spin.setRange(0.3, 0.9)
+        self.t_strict_merge_spin.setSingleStep(0.05)
+        self.t_strict_merge_spin.setDecimals(2)
+        strict_layout.addWidget(self.t_strict_merge_spin)
+        strict_layout.addStretch()
+        crossday_form.addLayout(strict_layout)
+        
+        # T_NEW_ID
+        new_id_layout = QHBoxLayout()
+        new_id_layout.addWidget(QLabel("New ID Threshold:"))
+        self.t_new_id_spin = QDoubleSpinBox()
+        self.t_new_id_spin.setRange(0.1, 0.6)
+        self.t_new_id_spin.setSingleStep(0.05)
+        self.t_new_id_spin.setDecimals(2)
+        new_id_layout.addWidget(self.t_new_id_spin)
+        new_id_layout.addStretch()
+        crossday_form.addLayout(new_id_layout)
+        
+        # MIN_SAMPLES
+        samples_layout = QHBoxLayout()
+        samples_layout.addWidget(QLabel("Min Samples:"))
+        self.min_samples_spin = QSpinBox()
+        self.min_samples_spin.setRange(3, 20)
+        samples_layout.addWidget(self.min_samples_spin)
+        samples_layout.addStretch()
+        crossday_form.addLayout(samples_layout)
+        
+        # VISITOR_UPGRADE_DAYS
+        upgrade_layout = QHBoxLayout()
+        upgrade_layout.addWidget(QLabel("Visitor Upgrade Days:"))
+        self.visitor_upgrade_spin = QSpinBox()
+        self.visitor_upgrade_spin.setRange(1, 10)
+        upgrade_layout.addWidget(self.visitor_upgrade_spin)
+        upgrade_layout.addStretch()
+        crossday_form.addLayout(upgrade_layout)
+        
+        crossday_layout.addWidget(crossday_group)
+        crossday_layout.addStretch()
+        
+        tabs.addTab(crossday_tab, "Attendance")
+        
+        # General settings tab
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+        
+        general_group = QGroupBox("General Settings")
+        general_form = QVBoxLayout(general_group)
+        
+        self.preview_checkbox = QCheckBox("Enable video preview by default")
+        general_form.addWidget(self.preview_checkbox)
+        
+        general_layout.addWidget(general_group)
+        general_layout.addStretch()
+        
+        tabs.addTab(general_tab, "General")
+        
+        layout.addWidget(tabs)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.clicked.connect(self._reset_defaults)
+        button_layout.addWidget(reset_btn)
+        
+        button_layout.addStretch()
+        
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self._save_and_accept)
+        button_box.rejected.connect(self.reject)
+        button_layout.addWidget(button_box)
+        
+        layout.addLayout(button_layout)
+        
+    def _load_settings(self):
+        """Load current settings."""
+        # Classroom
+        classroom = self.config.get_section("classroom")
+        self.probe_duration_spin.setValue(classroom.get("probe_duration", 300))
+        self.probe_interval_spin.setValue(classroom.get("probe_interval", 3600))
+        self.frame_skip_spin.setValue(classroom.get("frame_skip", 3))
+        self.similarity_spin.setValue(classroom.get("similarity_threshold", 0.75))
+        self.max_time_gap_spin.setValue(classroom.get("max_time_gap", 600))
+        self.max_pixel_dist_spin.setValue(classroom.get("max_pixel_dist", 200))
+        
+        # Cross-day
+        crossday = self.config.get_section("crossday")
+        self.t_strict_merge_spin.setValue(crossday.get("t_strict_merge", 0.55))
+        self.t_new_id_spin.setValue(crossday.get("t_new_id", 0.35))
+        self.min_samples_spin.setValue(crossday.get("min_samples", 8))
+        self.visitor_upgrade_spin.setValue(crossday.get("visitor_upgrade_days", 3))
+        
+        # General
+        self.preview_checkbox.setChecked(self.config.get("preview_enabled", False))
+        
+    def _save_and_accept(self):
+        """Save settings and close dialog."""
+        # Classroom
+        self.config.set("classroom.probe_duration", self.probe_duration_spin.value(), save=False)
+        self.config.set("classroom.probe_interval", self.probe_interval_spin.value(), save=False)
+        self.config.set("classroom.frame_skip", self.frame_skip_spin.value(), save=False)
+        self.config.set("classroom.similarity_threshold", self.similarity_spin.value(), save=False)
+        self.config.set("classroom.max_time_gap", self.max_time_gap_spin.value(), save=False)
+        self.config.set("classroom.max_pixel_dist", self.max_pixel_dist_spin.value(), save=False)
+        
+        # Cross-day
+        self.config.set("crossday.t_strict_merge", self.t_strict_merge_spin.value(), save=False)
+        self.config.set("crossday.t_new_id", self.t_new_id_spin.value(), save=False)
+        self.config.set("crossday.min_samples", self.min_samples_spin.value(), save=False)
+        self.config.set("crossday.visitor_upgrade_days", self.visitor_upgrade_spin.value(), save=False)
+        
+        # General
+        self.config.set("preview_enabled", self.preview_checkbox.isChecked(), save=True)
+        
+        self.accept()
+        
+    def _reset_defaults(self):
+        """Reset all settings to defaults."""
+        reply = QMessageBox.question(
+            self,
+            "Reset Settings",
+            "Are you sure you want to reset all settings to their default values?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.config.reset()
+            self._load_settings()
