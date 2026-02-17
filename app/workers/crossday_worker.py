@@ -20,7 +20,7 @@ class CrossDayWorker(QThread):
     
     progress = pyqtSignal(int, str)  # percent, message
     log_message = pyqtSignal(str, str)  # message, level
-    frame_ready = pyqtSignal(np.ndarray)  # for video preview
+    frame_ready = pyqtSignal(np.ndarray, bool)  # frame, is_rgb (for video preview)
     finished = pyqtSignal(str)  # report path
     error = pyqtSignal(str)  # error message
     
@@ -92,10 +92,10 @@ class CrossDayWorker(QThread):
         """Emit log message signal."""
         self.log_message.emit(message, level)
         
-    def _emit_frame(self, frame: np.ndarray):
+    def _emit_frame(self, frame: np.ndarray, is_rgb: bool = False):
         """Emit frame for preview."""
         if self.preview_enabled:
-            self.frame_ready.emit(frame)
+            self.frame_ready.emit(frame, is_rgb)
             
     def _check_stop(self) -> bool:
         """Check if stop was requested."""
@@ -205,6 +205,7 @@ class CrossDayAnalyzerWithCallbacks:
         person_model = YOLO("yolov8n.pt")
         
         # FaceAnalysis: load only if onnxruntime + InsightFace available
+        # Uses same settings as OLDCODE/main.py: buffalo_l model, det_size=(640,640)
         if face_app == "pending":
             self._log("Loading face analysis model...")
             try:
@@ -220,7 +221,7 @@ class CrossDayAnalyzerWithCallbacks:
                         face_app = None
                 if face_app is None or face_app == "pending":
                     face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-                    face_app.prepare(ctx_id=-1, det_size=(640, 640))
+                    face_app.prepare(ctx_id=0, det_size=(640, 640))  # ctx_id=0 same as old code
                 self._log("Face analysis model loaded", "success")
             except Exception as e:
                 self._log(f"Face model failed ({e}), using simplified mode.", "warning")
@@ -362,6 +363,9 @@ class CrossDayAnalyzerWithCallbacks:
         
         # Process frames
         frame_idx = 0
+        face_fail_streak = 0
+        FACE_FAIL_FALLBACK = 30  # After this many consecutive face_app.get() failures, fall back to tracking-only
+        effective_face_mode = face_app is not None  # Will switch to False if face_app.get fails repeatedly
         while cap.isOpened():
             if self._should_stop():
                 break
@@ -375,9 +379,9 @@ class CrossDayAnalyzerWithCallbacks:
             
             timestamp = datetime.fromtimestamp(frame_idx / fps).strftime('%H:%M:%S')
             
-            # Progress
-            progress = int(frame_idx / total_frames * 100)
-            if frame_idx % 100 == 0:
+            # Progress (0-90% for main loop; 90-100% reserved for save/report)
+            if frame_idx % 100 == 0 and total_frames > 0:
+                progress = min(90, int(frame_idx / total_frames * 90))
                 self._progress(progress, f"Processing frame {frame_idx}/{total_frames}")
             
             # Person tracking
@@ -407,8 +411,21 @@ class CrossDayAnalyzerWithCallbacks:
                         log_attendance(gid, timestamp)
             
             # Face detection and embedding (skip if simplified mode)
-            if face_app is not None:
-                faces = face_app.get(frame)
+            if face_app is not None and effective_face_mode:
+                try:
+                    faces = face_app.get(frame)
+                    face_fail_streak = 0
+                except (AttributeError, ValueError, Exception) as e:
+                    faces = []
+                    face_fail_streak += 1
+                    if face_fail_streak == 1:
+                        self._log(f"Face detection failed: {e}", "warning")
+                    if face_fail_streak >= FACE_FAIL_FALLBACK:
+                        effective_face_mode = False
+                        self._log(
+                            f"Face detection failing repeatedly. Switching to tracking-only mode (like simplified mode).",
+                            "warning"
+                        )
             else:
                 faces = []
             assigned_tracks = set()
@@ -466,8 +483,8 @@ class CrossDayAnalyzerWithCallbacks:
                 t_data = track_vault[t_id]
                 x1, y1, x2, y2 = map(int, pt['bbox'])
                 
-                # Simplified mode: assign ID after a few frames (no face embedding)
-                if face_app is None and t_data["global_id"] is None and t_data["frames"] >= 5:
+                # Simplified/tracking-only mode: assign ID after 5 frames when face detection unavailable
+                if (face_app is None or not effective_face_mode) and t_data["global_id"] is None and t_data["frames"] >= 5:
                     if RUN_MODE == "BUILD_DB":
                         new_gid = f"G_{next_global_id:03d}"
                         next_global_id += 1
@@ -519,7 +536,7 @@ class CrossDayAnalyzerWithCallbacks:
                     label = f"ID: {gid}"
                 else:
                     color = (0, 165, 255)  # Orange for scanning
-                    if face_app is not None:
+                    if effective_face_mode:
                         progress_count = min(len(t_data['embeddings']), MIN_SAMPLES)
                         label = f"Scanning: {progress_count}/{MIN_SAMPLES}"
                     else:
@@ -530,9 +547,14 @@ class CrossDayAnalyzerWithCallbacks:
             
             out.write(frame)
             
-            # Send frame for preview (every 25th to reduce lag)
-            if self.frame_callback and frame_idx % 25 == 0:
-                self.frame_callback(frame.copy())
+            # Send frame for real-time preview (every frame)
+            if self.frame_callback:
+                preview_frame = frame.copy()
+                h, w = preview_frame.shape[:2]
+                if w > 480:
+                    preview_frame = cv2.resize(preview_frame, (480, int(h * 480 / w)))
+                preview_frame = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
+                self.frame_callback(preview_frame, True)
             
             frame_idx += 1
         
@@ -559,7 +581,7 @@ class CrossDayAnalyzerWithCallbacks:
         
         # Save database
         self._log("Saving database...")
-        self._progress(95, "Saving database...")
+        self._progress(92, "Saving database...")
         
         db_data = {
             "gallery": global_gallery,
@@ -577,7 +599,7 @@ class CrossDayAnalyzerWithCallbacks:
         
         # Generate report
         self._log("Generating report...")
-        self._progress(98, "Generating report...")
+        self._progress(96, "Generating report...")
         
         def calculate_duration(entry_str, exit_str):
             fmt = '%H:%M:%S'

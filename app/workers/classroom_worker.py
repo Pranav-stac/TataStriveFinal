@@ -21,7 +21,7 @@ class ClassroomWorker(QThread):
     
     progress = pyqtSignal(int, str)  # percent, message
     log_message = pyqtSignal(str, str)  # message, level
-    frame_ready = pyqtSignal(np.ndarray)  # for video preview
+    frame_ready = pyqtSignal(np.ndarray, bool)  # frame, is_rgb (for video preview)
     finished = pyqtSignal(str)  # report path
     error = pyqtSignal(str)  # error message
     
@@ -95,10 +95,10 @@ class ClassroomWorker(QThread):
         """Emit log message signal."""
         self.log_message.emit(message, level)
         
-    def _emit_frame(self, frame: np.ndarray):
+    def _emit_frame(self, frame: np.ndarray, is_rgb: bool = False):
         """Emit frame for preview."""
         if self.preview_enabled:
-            self.frame_ready.emit(frame)
+            self.frame_ready.emit(frame, is_rgb)
             
     def _check_stop(self) -> bool:
         """Check if stop was requested."""
@@ -522,9 +522,11 @@ class FaceEngagementAnalyzerWithCallbacks:
                     
                 curr_frame_global = start_f + frames_processed
                 
-                # Progress calculation
-                overall_progress = int((probe_idx * probe_frames + frames_processed) / (total_probes * probe_frames) * 100)
-                self._progress(overall_progress, f"Probe {probe_idx + 1}/{total_probes} - Frame {frames_processed}/{probe_frames}")
+                # Progress calculation (0-90% for main loop; 90-100% reserved for stitching/report)
+                total_work = total_probes * probe_frames
+                if total_work > 0 and frames_processed % 50 == 0:
+                    overall_progress = min(90, int((probe_idx * probe_frames + frames_processed) / total_work * 90))
+                    self._progress(overall_progress, f"Probe {probe_idx + 1}/{total_probes} - Frame {frames_processed}/{probe_frames}")
                 
                 if frames_processed % FRAME_SKIP == 0:
                     tracked_bodies = []  # Always init so frame callback can iterate
@@ -641,8 +643,8 @@ class FaceEngagementAnalyzerWithCallbacks:
                                     body['activity'] = 'detected'
                                     body['state'] = ''
                     
-                    # Draw annotations and send frame for preview (every 25th to reduce lag)
-                    if self.frame_callback and frames_processed % 25 == 0:
+                    # Draw annotations and send frame for real-time preview (every frame)
+                    if self.frame_callback:
                         preview_frame = frame.copy()
                         for body in tracked_bodies:
                             x1, y1, x2, y2 = [int(v) for v in body['bbox']]
@@ -653,7 +655,12 @@ class FaceEngagementAnalyzerWithCallbacks:
                             cv2.rectangle(preview_frame, (x1, y1), (x2, y2), color, 2)
                             label = f"ID:{pid}" + (f" {activity}" if activity else "")
                             cv2.putText(preview_frame, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-                        self.frame_callback(preview_frame)
+                        # Resize and convert to RGB in worker thread for responsive UI
+                        h, w = preview_frame.shape[:2]
+                        if w > 480:
+                            preview_frame = cv2.resize(preview_frame, (480, int(h * 480 / w)))
+                        preview_frame = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
+                        self.frame_callback(preview_frame, True)
                 
                 frames_processed += 1
             
@@ -671,7 +678,7 @@ class FaceEngagementAnalyzerWithCallbacks:
         
         # Post-processing & Stitching (matching original)
         self._log("Running post-processing and stitching...")
-        self._progress(95, "Stitching tracks...")
+        self._progress(92, "Stitching tracks...")
         
         # 1. Export Raw Stitching Index
         stitch_index_path = os.path.join(self.output_dir, "stitching_index.json")
@@ -713,7 +720,7 @@ class FaceEngagementAnalyzerWithCallbacks:
         
         # 4. Generate Final Corrected Report
         self._log("Generating report...")
-        self._progress(98, "Generating report...")
+        self._progress(96, "Generating report...")
         
         final_hourly_report = []
         for probe in raw_probe_data:

@@ -15,6 +15,22 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+# When frozen (PyInstaller): add DLL search paths so onnxruntime and its deps are found
+# (Works from source; fails in exe due to different DLL search order / VC++ runtime)
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _base = Path(sys._MEIPASS)  # _internal/ for PyInstaller 6 onedir
+    _dll_dirs = [str(_base), str(_base / "onnxruntime" / "capi")]
+    # Prepend to PATH (older method, broader compatibility)
+    _existing_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = ";".join(_dll_dirs) + ";" + _existing_path
+    # Also use add_dll_directory (modern method)
+    for _dll_dir in _dll_dirs:
+        if Path(_dll_dir).exists():
+            try:
+                os.add_dll_directory(_dll_dir)
+            except (OSError, AttributeError):
+                pass
+
 # Load onnxruntime as early as possible (before PyTorch/PyQt) - DLL order matters on Windows
 try:
     import onnxruntime as _ort

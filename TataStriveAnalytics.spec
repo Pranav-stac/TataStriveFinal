@@ -1,27 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
-datas = [('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app\\resources', 'resources'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app', 'app'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\classroom_analysis', 'classroom_analysis'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\Models', 'Models')]
-binaries = []
-hiddenimports = ['ultralytics', 'typing_extensions', 'omegaconf', 'boxmot', 'insightface', 'onnxruntime', 'scipy.spatial.distance', 'cv2', 'torch', 'torchvision', 'numpy', 'PIL', 'groq', 'python-dotenv', 'dotenv', 'PyQt6', 'PyQt6.QtWidgets', 'PyQt6.QtCore', 'PyQt6.QtGui']
-tmp_ret = collect_all('ultralytics')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('insightface')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('onnxruntime')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+binaries = [('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\env\\Lib\\site-packages\\onnxruntime\\capi\\onnxruntime.dll', 'onnxruntime/capi'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\env\\Lib\\site-packages\\onnxruntime\\capi\\onnxruntime_providers_shared.dll', 'onnxruntime/capi'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\env\\Lib\\site-packages\\onnxruntime\\capi\\onnxruntime_pybind11_state.pyd', 'onnxruntime/capi')]
+binaries += collect_dynamic_libs('onnxruntime')
 
 
 a = Analysis(
     ['E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app\\main.py'],
-    pathex=[],
+    pathex=['E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\env'],
     binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
+    datas=[('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app\\resources', 'resources'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app', 'app'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\classroom_analysis', 'classroom_analysis'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\Models', 'Models')],
+    hiddenimports=['typing_extensions', 'ultralytics', 'ultralytics.models', 'ultralytics.nn', 'ultralytics.utils', 'onnx', 'omegaconf', 'boxmot', 'insightface', 'onnxruntime', 'scipy.spatial.distance', 'cv2', 'torch', 'torchvision', 'numpy', 'PIL', 'groq', 'dotenv', 'PyQt6', 'PyQt6.QtWidgets', 'PyQt6.QtCore', 'PyQt6.QtGui'],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
+    runtime_hooks=['E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\pyi_rth_onnxruntime.py'],
+    excludes=['onnx.reference'],
     noarchive=False,
     optimize=0,
 )

@@ -21,6 +21,7 @@ class VideoPreview(QFrame):
         super().__init__(parent)
         self._preview_enabled = False
         self._preview_busy = False  # Drop frames when still processing
+        self._last_preview_size = (0, 0)  # Skip adjustSize when unchanged
         self._setup_ui()
         
     def _setup_ui(self):
@@ -97,20 +98,20 @@ class VideoPreview(QFrame):
         if not enabled:
             self._show_placeholder()
             
-    @pyqtSlot(np.ndarray)
-    def update_frame(self, frame: np.ndarray):
-        """Update the display with a new frame."""
+    @pyqtSlot(np.ndarray, bool)
+    def update_frame(self, frame: np.ndarray, is_rgb: bool = False):
+        """Update the display with a new frame. Frame is pre-resized RGB when is_rgb=True."""
         if not self._preview_enabled:
             return
         
-        # Drop frame if still processing previous (reduces lag)
+        # Drop frame if still processing previous (keeps UI responsive)
         if self._preview_busy:
             return
         
         self._preview_busy = True
         try:
-            # Convert BGR to RGB if needed
-            if len(frame.shape) == 3 and frame.shape[2] == 3:
+            # Use frame directly if already RGB (from worker), else convert BGR→RGB
+            if not is_rgb and len(frame.shape) == 3 and frame.shape[2] == 3:
                 import cv2
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             else:
@@ -119,23 +120,13 @@ class VideoPreview(QFrame):
             h, w, ch = rgb.shape
             bytes_per_line = ch * w
             qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-            
-            # Scale to max 640px for smoother preview (FastTransformation = less lag)
-            max_w = 640
-            if w > max_w:
-                scale = max_w / w
-                new_w = max_w
-                new_h = int(h * scale)
-                scaled_pixmap = QPixmap.fromImage(qimg).scaled(
-                    new_w, new_h,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation
-                )
-            else:
-                scaled_pixmap = QPixmap.fromImage(qimg)
+            scaled_pixmap = QPixmap.fromImage(qimg)
             
             self.video_label.setPixmap(scaled_pixmap)
-            self.video_label.adjustSize()
+            # Only trigger layout when size changes (reduces lag)
+            if (w, h) != getattr(self, '_last_preview_size', (0, 0)):
+                self._last_preview_size = (w, h)
+                self.video_label.adjustSize()
         except Exception as e:
             print(f"Error updating frame: {e}")
         finally:
@@ -151,6 +142,7 @@ class VideoPreview(QFrame):
         
     def clear(self):
         """Clear the video display."""
+        self._last_preview_size = (0, 0)
         self._show_placeholder()
         
     def setEnabled(self, enabled: bool):
