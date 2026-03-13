@@ -3,3 +3,6 @@
 /Models
 /dist
 *.pt
+*.pyc
+__pycache__/
+app/Creds/*.json

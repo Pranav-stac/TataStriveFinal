@@ -745,17 +745,17 @@ class FaceEngagementAnalyzerWithCallbacks:
             total_att = sum(probe_attention.values())
             att_dist = {k: round(v / total_att * 100, 1) for k, v in probe_attention.items()} if total_att else {}
             
-            # Class mode logic (matching original)
+            # Class mode logic (matching original) + Chaos/Activity identification
+            mvmt = probe_activities.get('walking', 0) + probe_activities.get('talking', 0)
             if student_count < 5:
                 mode = "Break"
             elif max_students > 0 and student_count < (max_students * 0.66):
-                mode = "Transition/Sparse"
+                mode = "Chaos"  # Transition/Sparse - students moving, unsettled
             else:
-                mvmt = probe_activities.get('walking', 0) + probe_activities.get('talking', 0)
                 if total_act > 0 and mvmt > (total_act * 0.3):
-                    mode = "Interactive"
+                    mode = "Activity"  # Interactive - group work, hands-on
                 else:
-                    mode = "Lecture"
+                    mode = "Lecture"  # Teacher-centered, low movement
             
             # Real world time calculator (matching original)
             real_time_str = "Unknown"
@@ -774,17 +774,105 @@ class FaceEngagementAnalyzerWithCallbacks:
                 "attention_distribution": att_dist
             })
         
+        # 1. Class start time: first probe where class is in session (not Break)
+        class_start_time_sec = None
+        class_start_real_time = "Unknown"
+        for entry in final_hourly_report:
+            if entry["class_mode"] != "Break" and entry["student_count_corrected"] >= 5:
+                class_start_time_sec = entry["video_timestamp_sec"]
+                class_start_real_time = entry["real_world_time"]
+                break
+        
+        # 2. Event duration: merge consecutive probes with same mode into events
+        events = []
+        duration_by_type = {"Lecture": 0, "Activity": 0, "Chaos": 0, "Break": 0}
+        
+        if final_hourly_report:
+            current_event = {
+                "type": final_hourly_report[0]["class_mode"],
+                "start_time_sec": final_hourly_report[0]["video_timestamp_sec"],
+                "start_real_time": final_hourly_report[0]["real_world_time"],
+                "probe_indices": [final_hourly_report[0]["time_slice"]]
+            }
+            
+            for entry in final_hourly_report[1:]:
+                probe_start = entry["video_timestamp_sec"]
+                probe_end = probe_start + PROBE_DURATION_SEC
+                
+                if entry["class_mode"] == current_event["type"]:
+                    current_event["probe_indices"].append(entry["time_slice"])
+                else:
+                    # Close current event
+                    current_event["end_time_sec"] = current_event["start_time_sec"] + (
+                        len(current_event["probe_indices"]) * PROBE_DURATION_SEC
+                    )
+                    current_event["duration_sec"] = len(current_event["probe_indices"]) * PROBE_DURATION_SEC
+                    if video_metadata["base_datetime"] is not None:
+                        end_dt = video_metadata["base_datetime"] + timedelta(seconds=current_event["end_time_sec"])
+                        current_event["end_real_time"] = end_dt.strftime("%I:%M:%S %p")
+                    else:
+                        current_event["end_real_time"] = "Unknown"
+                    events.append(current_event)
+                    duration_by_type[current_event["type"]] = duration_by_type.get(
+                        current_event["type"], 0
+                    ) + current_event["duration_sec"]
+                    
+                    # Start new event
+                    current_event = {
+                        "type": entry["class_mode"],
+                        "start_time_sec": probe_start,
+                        "start_real_time": entry["real_world_time"],
+                        "probe_indices": [entry["time_slice"]]
+                    }
+            
+            # Close last event
+            current_event["end_time_sec"] = current_event["start_time_sec"] + (
+                len(current_event["probe_indices"]) * PROBE_DURATION_SEC
+            )
+            current_event["duration_sec"] = len(current_event["probe_indices"]) * PROBE_DURATION_SEC
+            if video_metadata["base_datetime"] is not None:
+                end_dt = video_metadata["base_datetime"] + timedelta(seconds=current_event["end_time_sec"])
+                current_event["end_real_time"] = end_dt.strftime("%I:%M:%S %p")
+            else:
+                current_event["end_real_time"] = "Unknown"
+            events.append(current_event)
+            duration_by_type[current_event["type"]] = duration_by_type.get(
+                current_event["type"], 0
+            ) + current_event["duration_sec"]
+        
         # Save report (matching original structure)
         report_path = os.path.join(self.output_dir, "class_dynamics_report.json")
+        report_data = {
+            "video_path": self.video_path,
+            "classroom": video_metadata["classroom"],
+            "recording_date": video_metadata["base_datetime_str"],
+            "report_type": "Corrected (Stitched)",
+            "baseline_max_students": max_students,
+            "class_start_time": {
+                "video_timestamp_sec": class_start_time_sec,
+                "real_world_time": class_start_real_time
+            },
+            "event_duration_summary": {
+                "Lecture_sec": round(duration_by_type.get("Lecture", 0), 1),
+                "Activity_sec": round(duration_by_type.get("Activity", 0), 1),
+                "Chaos_sec": round(duration_by_type.get("Chaos", 0), 1),
+                "Break_sec": round(duration_by_type.get("Break", 0), 1)
+            },
+            "events": [
+                {
+                    "type": e["type"],
+                    "start_time_sec": e["start_time_sec"],
+                    "end_time_sec": e["end_time_sec"],
+                    "duration_sec": e["duration_sec"],
+                    "start_real_time": e["start_real_time"],
+                    "end_real_time": e["end_real_time"]
+                }
+                for e in events
+            ],
+            "hourly_probes": final_hourly_report
+        }
         with open(report_path, 'w') as f:
-            json.dump({
-                "video_path": self.video_path,
-                "classroom": video_metadata["classroom"],
-                "recording_date": video_metadata["base_datetime_str"],
-                "report_type": "Corrected (Stitched)",
-                "baseline_max_students": max_students,
-                "hourly_probes": final_hourly_report
-            }, f, indent=4)
+            json.dump(report_data, f, indent=4)
         
         self._log(f"Report saved: {report_path}", "success")
         self._progress(100, "Analysis complete!")

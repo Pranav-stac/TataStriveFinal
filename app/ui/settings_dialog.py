@@ -6,7 +6,7 @@ Application settings configuration dialog.
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QSpinBox, QDoubleSpinBox, QPushButton, QTabWidget,
-    QWidget, QCheckBox, QDialogButtonBox, QMessageBox
+    QWidget, QCheckBox, QDialogButtonBox, QMessageBox, QComboBox
 )
 from PyQt6.QtCore import Qt
 
@@ -134,6 +134,18 @@ class SettingsDialog(QDialog):
         new_id_layout.addStretch()
         crossday_form.addLayout(new_id_layout)
         
+        # T_RATIO_MARGIN
+        margin_layout = QHBoxLayout()
+        margin_layout.addWidget(QLabel("Ratio Margin:"))
+        self.t_ratio_margin_spin = QDoubleSpinBox()
+        self.t_ratio_margin_spin.setRange(0.05, 0.3)
+        self.t_ratio_margin_spin.setSingleStep(0.05)
+        self.t_ratio_margin_spin.setDecimals(2)
+        self.t_ratio_margin_spin.setToolTip("Minimum gap between best and second-best match (default: 0.10)")
+        margin_layout.addWidget(self.t_ratio_margin_spin)
+        margin_layout.addStretch()
+        crossday_form.addLayout(margin_layout)
+        
         # MIN_SAMPLES
         samples_layout = QHBoxLayout()
         samples_layout.addWidget(QLabel("Min Samples:"))
@@ -156,6 +168,63 @@ class SettingsDialog(QDialog):
         crossday_layout.addStretch()
         
         tabs.addTab(crossday_tab, "Attendance")
+        
+        # Inference / Performance tab
+        inference_tab = QWidget()
+        inference_layout = QVBoxLayout(inference_tab)
+        
+        inference_group = QGroupBox("CPU Acceleration (Intel OpenVINO)")
+        inference_form = QVBoxLayout(inference_group)
+        
+        self.use_openvino_checkbox = QCheckBox("Use OpenVINO for faster CPU inference (2-3x speedup on Intel)")
+        self.use_openvino_checkbox.setToolTip("Requires: pip install openvino. Falls back to PyTorch/ONNX if unavailable.")
+        inference_form.addWidget(self.use_openvino_checkbox)
+        
+        yolo_imgsz_layout = QHBoxLayout()
+        yolo_imgsz_layout.addWidget(QLabel("YOLO inference size:"))
+        self.yolo_imgsz_spin = QSpinBox()
+        self.yolo_imgsz_spin.setRange(320, 640)
+        self.yolo_imgsz_spin.setSingleStep(32)
+        self.yolo_imgsz_spin.setSuffix(" px")
+        self.yolo_imgsz_spin.setToolTip("320=fastest, 640=best quality. 416 is a good balance.")
+        yolo_imgsz_layout.addWidget(self.yolo_imgsz_spin)
+        yolo_imgsz_layout.addStretch()
+        inference_form.addLayout(yolo_imgsz_layout)
+        
+        face_det_layout = QHBoxLayout()
+        face_det_layout.addWidget(QLabel("Face detection size:"))
+        self.face_det_size_spin = QSpinBox()
+        self.face_det_size_spin.setRange(320, 640)
+        self.face_det_size_spin.setSingleStep(32)
+        self.face_det_size_spin.setSuffix(" px")
+        self.face_det_size_spin.setToolTip("320=fastest, 640=best quality. 416 is a good balance.")
+        face_det_layout.addWidget(self.face_det_size_spin)
+        face_det_layout.addStretch()
+        inference_form.addLayout(face_det_layout)
+        
+        frame_skip_layout = QHBoxLayout()
+        frame_skip_layout.addWidget(QLabel("Face frame skip (attendance):"))
+        self.frame_skip_attendance_spin = QSpinBox()
+        self.frame_skip_attendance_spin.setRange(1, 5)
+        self.frame_skip_attendance_spin.setToolTip("Run face detection every Nth frame. 1=every frame (best accuracy), 2-5=faster, slight accuracy trade-off.")
+        frame_skip_layout.addWidget(self.frame_skip_attendance_spin)
+        frame_skip_layout.addStretch()
+        inference_form.addLayout(frame_skip_layout)
+        
+        preview_mode_layout = QHBoxLayout()
+        preview_mode_layout.addWidget(QLabel("Preview mode:"))
+        self.preview_mode_combo = QComboBox()
+        self.preview_mode_combo.addItem("cv2 (fast, separate window)", "cv2")
+        self.preview_mode_combo.addItem("PyQt (integrated in app)", "pyqt")
+        self.preview_mode_combo.setToolTip("cv2.imshow is faster with no cross-thread overhead. PyQt shows in app but can slow processing.")
+        preview_mode_layout.addWidget(self.preview_mode_combo)
+        preview_mode_layout.addStretch()
+        inference_form.addLayout(preview_mode_layout)
+        
+        inference_layout.addWidget(inference_group)
+        inference_layout.addStretch()
+        
+        tabs.addTab(inference_tab, "Performance")
         
         # General settings tab
         general_tab = QWidget()
@@ -207,8 +276,18 @@ class SettingsDialog(QDialog):
         crossday = self.config.get_section("crossday")
         self.t_strict_merge_spin.setValue(crossday.get("t_strict_merge", 0.55))
         self.t_new_id_spin.setValue(crossday.get("t_new_id", 0.35))
+        self.t_ratio_margin_spin.setValue(crossday.get("t_ratio_margin", 0.10))
         self.min_samples_spin.setValue(crossday.get("min_samples", 8))
         self.visitor_upgrade_spin.setValue(crossday.get("visitor_upgrade_days", 3))
+        
+        # Inference
+        inference = self.config.get_section("inference") or {}
+        self.use_openvino_checkbox.setChecked(inference.get("use_openvino", True))
+        self.yolo_imgsz_spin.setValue(inference.get("yolo_imgsz", 416))
+        self.face_det_size_spin.setValue(inference.get("face_det_size", 416))
+        self.frame_skip_attendance_spin.setValue(inference.get("frame_skip", 1))
+        idx = self.preview_mode_combo.findData(inference.get("preview_mode", "cv2"))
+        self.preview_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
         
         # General
         self.preview_checkbox.setChecked(self.config.get("preview_enabled", False))
@@ -226,8 +305,16 @@ class SettingsDialog(QDialog):
         # Cross-day
         self.config.set("crossday.t_strict_merge", self.t_strict_merge_spin.value(), save=False)
         self.config.set("crossday.t_new_id", self.t_new_id_spin.value(), save=False)
+        self.config.set("crossday.t_ratio_margin", self.t_ratio_margin_spin.value(), save=False)
         self.config.set("crossday.min_samples", self.min_samples_spin.value(), save=False)
         self.config.set("crossday.visitor_upgrade_days", self.visitor_upgrade_spin.value(), save=False)
+        
+        # Inference
+        self.config.set("inference.use_openvino", self.use_openvino_checkbox.isChecked(), save=False)
+        self.config.set("inference.yolo_imgsz", self.yolo_imgsz_spin.value(), save=False)
+        self.config.set("inference.face_det_size", self.face_det_size_spin.value(), save=False)
+        self.config.set("inference.frame_skip", self.frame_skip_attendance_spin.value(), save=False)
+        self.config.set("inference.preview_mode", self.preview_mode_combo.currentData(), save=False)
         
         # General
         self.config.set("preview_enabled", self.preview_checkbox.isChecked(), save=True)

@@ -69,10 +69,10 @@ def main():
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
-    
+
     # Create application (needed for message box)
     app = QApplication(sys.argv)
-    
+
     # Pre-load PyTorch in main thread (avoids DLL issues when loading in worker thread)
     torch_available = False
     try:
@@ -95,11 +95,11 @@ def main():
         )
         if reply == QMessageBox.StandardButton.Cancel:
             sys.exit(1)
-    
+
     app.setApplicationName("TataStrive Analytics")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("TataStrive")
-    
+
     # Set application icon
     icon_paths = [
         Path(__file__).parent / "resources" / "icons" / "app.ico",
@@ -109,19 +109,52 @@ def main():
         if icon_path.exists():
             app.setWindowIcon(QIcon(str(icon_path)))
             break
-    
+
     # Load stylesheet
     load_stylesheet(app)
-    
-    # Import and create main window
+
+    # ── Center-ID setup ───────────────────────────────────────────────────
+    from app.config import get_config
+    from app.ui.center_dialog import CenterDialog
+
+    cfg = get_config()
+    center_id = cfg.get("center_id", "").strip()
+
+    if not center_id:
+        dlg = CenterDialog(parent=None, existing_name="")
+        dlg.exec()                        # Always accepted (OK button is the only exit)
+        center_id = dlg.center_name() or "DefaultCenter"
+        cfg.set("center_id", center_id)
+
+    # ── BigQuery service init ─────────────────────────────────────────────
+    from app.bigquery_sync import get_sync_service, _creds_path
+    bq_service = get_sync_service(
+        center_id=center_id,
+        credentials_path=_creds_path()
+    )
+
+    # ── Import and create main window ─────────────────────────────────────
     from app.ui.main_window import MainWindow
-    
-    window = MainWindow(torch_available=torch_available)
+
+    window = MainWindow(torch_available=torch_available, bq_service=bq_service)
     window.show()
-    
+
+    # ── Kick off daily BigQuery sync (background thread) ──────────────────
+    auto_sync = cfg.get("bigquery.auto_sync", True)
+    if auto_sync:
+        output_dirs = [
+            cfg.get("last_output_dir", ""),
+        ]
+        bq_service.trigger_daily_sync(
+            output_dirs=output_dirs,
+            log_callback=lambda msg: print(f"[BQ] {msg}"),
+            done_callback=lambda summary: window.on_bq_sync_done(summary)
+        )
+
     # Run application
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
     main()
+

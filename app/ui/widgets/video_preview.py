@@ -117,9 +117,11 @@ class VideoPreview(QFrame):
             else:
                 rgb = frame
             
+            # Ensure contiguous buffer for QImage; copy to avoid buffer invalidation
+            rgb = np.ascontiguousarray(rgb)
             h, w, ch = rgb.shape
             bytes_per_line = ch * w
-            qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
             scaled_pixmap = QPixmap.fromImage(qimg)
             
             self.video_label.setPixmap(scaled_pixmap)

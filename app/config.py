@@ -13,9 +13,16 @@ class ConfigManager:
     """Manages application configuration with JSON persistence."""
     
     DEFAULT_CONFIG = {
+        "center_id": "",           # Set on first launch via CenterDialog
         "last_video_path": "",
+        "last_video_folder": "",
         "last_output_dir": "",
         "last_db_path": "",
+        "bigquery": {
+            "auto_sync": True,         # Trigger daily sync automatically
+            "sync_hour": 0,            # Hour of day (UTC) to auto-sync (0 = midnight)
+            "last_sync_date": "",      # ISO date of last successful sync
+        },
         "classroom": {
             "probe_duration": 300,
             "probe_interval": 3600,
@@ -31,7 +38,15 @@ class ConfigManager:
             "min_samples": 8,
             "max_exemplars": 5,
             "t_outlier": 0.6,
-            "visitor_upgrade_days": 3
+            "visitor_upgrade_days": 3,
+            "save_output_video": True
+        },
+        "inference": {
+            "use_openvino": True,
+            "yolo_imgsz": 416,
+            "face_det_size": 416,
+            "frame_skip": 1,
+            "preview_mode": "cv2"
         },
         "preview_enabled": False,
         "window": {

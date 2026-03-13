@@ -1,18 +1,19 @@
 """
 Main Window for TataStrive Analytics.
-Contains the tabbed interface and menu bar.
+Contains the tabbed interface, menu bar, and BigQuery sync integration.
 """
 
 import os
 import sys
 from pathlib import Path
+from datetime import date
 
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QStatusBar, QMessageBox, QFileDialog,
-    QLabel, QApplication, QToolBar
+    QLabel, QApplication, QToolBar, QInputDialog
 )
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QMetaObject, Q_ARG, pyqtSlot
 from PyQt6.QtGui import QAction, QIcon, QCloseEvent
 
 from app.config import get_config
@@ -23,250 +24,423 @@ from app.ui.settings_dialog import SettingsDialog
 
 
 class MainWindow(QMainWindow):
-    """Main application window with tabbed interface."""
-    
-    def __init__(self, torch_available: bool = True):
+    """Main application window with tabbed interface and BigQuery sync."""
+
+    def __init__(self, torch_available: bool = True, bq_service=None):
         super().__init__()
         self.torch_available = torch_available
         self.config = get_config()
+        self._bq_service = bq_service          # BigQuerySyncService | None
         self._setup_ui()
         self._setup_menu()
         self._setup_statusbar()
         self._restore_geometry()
-        
+
+    # ──────────────────────────────────────────────────────────────────
+    # UI setup
+    # ──────────────────────────────────────────────────────────────────
+
     def _setup_ui(self):
         """Setup the main UI components."""
-        self.setWindowTitle("TataStrive Analytics")
+        center_id = self.config.get("center_id", "")
+        title = f"TataStrive Analytics  |  Center: {center_id}" if center_id else "TataStrive Analytics"
+        self.setWindowTitle(title)
         self.setMinimumSize(1000, 700)
-        
-        # Central widget with tab container
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        
+
         layout = QVBoxLayout(central_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
+
         # Tab widget
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
-        
-        # Create tabs
+
         self.classroom_tab = ClassroomTab()
-        self.crossday_tab = CrossDayTab()
+        self.crossday_tab  = CrossDayTab()
         self.report_viewer = ReportViewer()
-        
-        # Add tabs
+
         self.tab_widget.addTab(self.classroom_tab, "Classroom Analysis")
-        self.tab_widget.addTab(self.crossday_tab, "Attendance only")
+        self.tab_widget.addTab(self.crossday_tab,  "Attendance only")
         self.tab_widget.addTab(self.report_viewer, "Report Viewer")
-        
-        # Disable analysis tabs if PyTorch unavailable
+
         if not self.torch_available:
             self.tab_widget.setTabEnabled(0, False)
             self.tab_widget.setTabEnabled(1, False)
-            self.tab_widget.setCurrentIndex(2)  # Switch to Report Viewer
-        
+            self.tab_widget.setCurrentIndex(2)
+
         layout.addWidget(self.tab_widget)
-        
-        # Toolbar with Settings button
+
+        # ── Toolbar ──────────────────────────────────────────────────
         toolbar = QToolBar()
         toolbar.setMovable(False)
         toolbar.setObjectName("mainToolbar")
+
         settings_action = QAction("Settings", self)
         settings_action.setShortcut("Ctrl+,")
         settings_action.setToolTip("Open Settings (Ctrl+,)")
         settings_action.triggered.connect(self._show_settings)
         toolbar.addAction(settings_action)
+
+        toolbar.addSeparator()
+
+        sync_action = QAction("☁  Sync to BigQuery", self)
+        sync_action.setObjectName("bqSyncAction")
+        sync_action.setShortcut("Ctrl+Shift+S")
+        sync_action.setToolTip(
+            "Manually sync all attendance & engagement reports\n"
+            "from the last output directory to BigQuery (Ctrl+Shift+S)"
+        )
+        sync_action.triggered.connect(self._manual_bq_sync)
+        toolbar.addAction(sync_action)
+        self._sync_action = sync_action
+
         self.addToolBar(toolbar)
-        
-        # Connect signals
+
+        # Connect analysis signals
         self.classroom_tab.analysis_complete.connect(self._on_classroom_complete)
         self.crossday_tab.analysis_complete.connect(self._on_crossday_complete)
-        
+
     def _setup_menu(self):
         """Setup the menu bar."""
         menubar = self.menuBar()
-        
-        # File menu
+
+        # ── File ──────────────────────────────────────────────────────
         file_menu = menubar.addMenu("&File")
-        
-        open_video_action = QAction("&Open Video...", self)
+
+        open_video_action = QAction("&Open Input Folder...", self)
         open_video_action.setShortcut("Ctrl+O")
         open_video_action.triggered.connect(self._open_video)
         file_menu.addAction(open_video_action)
-        
+
         open_report_action = QAction("Open &Report...", self)
         open_report_action.setShortcut("Ctrl+R")
         open_report_action.triggered.connect(self._open_report)
         file_menu.addAction(open_report_action)
-        
+
         file_menu.addSeparator()
-        
+
         settings_action = QAction("&Settings...", self)
         settings_action.setShortcut("Ctrl+,")
         settings_action.triggered.connect(self._show_settings)
         file_menu.addAction(settings_action)
-        
+
         file_menu.addSeparator()
-        
+
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut("Alt+F4")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        
-        # View menu
+
+        # ── View ──────────────────────────────────────────────────────
         view_menu = menubar.addMenu("&View")
-        
+
         classroom_action = QAction("&Classroom Analysis", self)
         classroom_action.setShortcut("Ctrl+1")
         classroom_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(0))
         view_menu.addAction(classroom_action)
-        
+
         crossday_action = QAction("&Attendance only", self)
         crossday_action.setShortcut("Ctrl+2")
         crossday_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
         view_menu.addAction(crossday_action)
-        
+
         report_action = QAction("&Report Viewer", self)
         report_action.setShortcut("Ctrl+3")
         report_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(2))
         view_menu.addAction(report_action)
-        
-        # Help menu
+
+        # ── BigQuery ──────────────────────────────────────────────────
+        bq_menu = menubar.addMenu("&BigQuery")
+
+        sync_now_action = QAction("Sync &Now  (Ctrl+Shift+S)", self)
+        sync_now_action.setShortcut("Ctrl+Shift+S")
+        sync_now_action.triggered.connect(self._manual_bq_sync)
+        bq_menu.addAction(sync_now_action)
+
+        bq_menu.addSeparator()
+
+        change_center_action = QAction("Change &Center ID...", self)
+        change_center_action.triggered.connect(self._change_center_id)
+        bq_menu.addAction(change_center_action)
+
+        bq_menu.addSeparator()
+
+        view_sync_action = QAction("View BigQuery &Console", self)
+        view_sync_action.triggered.connect(lambda: self._open_bq_console())
+        bq_menu.addAction(view_sync_action)
+
+        # ── Help ──────────────────────────────────────────────────────
         help_menu = menubar.addMenu("&Help")
-        
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
-        
+
     def _setup_statusbar(self):
         """Setup the status bar."""
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
-        if self.torch_available:
-            self.statusbar.showMessage("Ready")
-        else:
-            self.statusbar.showMessage("Limited mode: PyTorch unavailable. Report Viewer only.")
-        
-        # Add permanent widgets
+
+        center_id = self.config.get("center_id", "")
+        base_msg = "Ready" if self.torch_available else "Limited mode: Report Viewer only."
+        self.statusbar.showMessage(base_msg)
+
+        # Center ID indicator (permanent, right-side)
+        self._center_label = QLabel(f"  Center: {center_id}  " if center_id else "  Center: (not set)  ")
+        self._center_label.setObjectName("centerLabel")
+        self.statusbar.addPermanentWidget(self._center_label)
+
         self.status_label = QLabel("TataStrive Analytics v1.0")
         self.statusbar.addPermanentWidget(self.status_label)
-        
+
+    # ──────────────────────────────────────────────────────────────────
+    # BigQuery sync – manual & auto
+    # ──────────────────────────────────────────────────────────────────
+
+    def _manual_bq_sync(self):
+        """User-triggered sync: scan last_output_dir and push to BigQuery."""
+        if self._bq_service is None:
+            QMessageBox.warning(
+                self, "BigQuery Not Available",
+                "BigQuery service is not initialised.\n"
+                "Check that google-cloud-bigquery is installed:\n\n"
+                "  pip install google-cloud-bigquery"
+            )
+            return
+
+        output_dir = self.config.get("last_output_dir", "")
+        if not output_dir:
+            output_dir_chosen = QFileDialog.getExistingDirectory(
+                self, "Select Output Directory to Sync", ""
+            )
+            if not output_dir_chosen:
+                return
+            output_dir = output_dir_chosen
+
+        self.statusbar.showMessage("⏳ BigQuery sync in progress...")
+        self._sync_action.setEnabled(False)
+
+        self._bq_service.trigger_daily_sync(
+            output_dirs=[output_dir],
+            log_callback=lambda msg: self.statusbar.showMessage(f"[BQ] {msg}"),
+            done_callback=self.on_bq_sync_done
+        )
+
+    def _sync_single_report(self, report_path: str):
+        """Auto-sync a single newly completed report immediately."""
+        if self._bq_service is None or not report_path:
+            return
+
+        import threading
+
+        def _run():
+            try:
+                self._bq_service.ensure_tables()
+                result = self._bq_service.sync_report(report_path)
+                if result["status"] == "ok":
+                    msg = (
+                        f"✅ BigQuery: synced {result['rows_inserted']} rows "
+                        f"from {Path(report_path).name}"
+                    )
+                else:
+                    msg = f"⚠ BigQuery sync issue: {result.get('error_msg', '')}"
+            except Exception as e:
+                msg = f"⚠ BigQuery sync error: {e}"
+            # Update status bar from main thread
+            QMetaObject.invokeMethod(
+                self.statusbar, "showMessage",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(str, msg)
+            )
+
+        t = threading.Thread(target=_run, daemon=True, name="bq-single-sync")
+        t.start()
+
+    @pyqtSlot(object)
+    def on_bq_sync_done(self, summary: dict):
+        """Slot called (from any thread) when a BQ sync completes."""
+        if "error" in summary:
+            msg = f"⚠ BigQuery sync failed: {summary['error']}"
+        else:
+            msg = (
+                f"☁ BigQuery sync done — "
+                f"synced: {summary.get('synced', 0)}, "
+                f"skipped: {summary.get('skipped', 0)}, "
+                f"errors: {summary.get('errors', 0)}"
+            )
+        # Must update UI from main thread
+        QMetaObject.invokeMethod(
+            self.statusbar, "showMessage",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(str, msg)
+        )
+        QMetaObject.invokeMethod(
+            self._sync_action, "setEnabled",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(bool, True)
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Center ID management
+    # ──────────────────────────────────────────────────────────────────
+
+    def _change_center_id(self):
+        """Allow the operator to rename this device's center ID."""
+        from app.ui.center_dialog import CenterDialog
+        current = self.config.get("center_id", "")
+        dlg = CenterDialog(parent=self, existing_name=current)
+        if dlg.exec():
+            new_id = dlg.center_name()
+            if new_id and new_id != current:
+                self.config.set("center_id", new_id)
+                # Reinitialise BQ service with new center_id
+                from app.bigquery_sync import get_sync_service, _creds_path
+                self._bq_service = get_sync_service(new_id, _creds_path())
+                self._center_label.setText(f"  Center: {new_id}  ")
+                self.setWindowTitle(
+                    f"TataStrive Analytics  |  Center: {new_id}"
+                )
+                self.statusbar.showMessage(f"Center ID updated to: {new_id}")
+
+    @staticmethod
+    def _open_bq_console():
+        """Open the BigQuery web console in the default browser."""
+        import webbrowser
+        webbrowser.open(
+            "https://console.cloud.google.com/bigquery?"
+            "project=tatastrive-269409"
+            "&p=tatastrive-269409&d=tatastrive_analytics&page=dataset"
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Geometry
+    # ──────────────────────────────────────────────────────────────────
+
     def _restore_geometry(self):
         """Restore window geometry from config."""
         window_config = self.config.get_section("window")
         self.resize(window_config.get("width", 1200), window_config.get("height", 800))
         self.move(window_config.get("x", 100), window_config.get("y", 100))
-        
+
     def _save_geometry(self):
         """Save window geometry to config."""
         geo = self.geometry()
-        self.config.set("window.width", geo.width(), save=False)
+        self.config.set("window.width",  geo.width(),  save=False)
         self.config.set("window.height", geo.height(), save=False)
-        self.config.set("window.x", geo.x(), save=False)
-        self.config.set("window.y", geo.y(), save=True)
-        
+        self.config.set("window.x",      geo.x(),      save=False)
+        self.config.set("window.y",      geo.y(),      save=True)
+
+    # ──────────────────────────────────────────────────────────────────
+    # File / settings helpers
+    # ──────────────────────────────────────────────────────────────────
+
     def _open_video(self):
-        """Open a video file."""
-        last_path = self.config.get("last_video_path", "")
-        start_dir = os.path.dirname(last_path) if last_path else ""
-        
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Video File",
-            start_dir,
-            "Video Files (*.mp4 *.avi *.mkv *.mov);;All Files (*.*)"
+        """Open an input folder."""
+        last_folder = self.config.get("last_video_folder", "")
+        start_dir = last_folder if os.path.isdir(last_folder) else ""
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "Open Input Folder", start_dir
         )
-        
-        if file_path:
-            self.config.set("last_video_path", file_path)
+        if folder_path:
+            self.config.set("last_video_folder", folder_path)
             current_tab = self.tab_widget.currentWidget()
-            if hasattr(current_tab, 'set_video_path'):
-                current_tab.set_video_path(file_path)
-            self.statusbar.showMessage(f"Loaded: {os.path.basename(file_path)}")
-            
+            if hasattr(current_tab, 'set_video_folder'):
+                current_tab.set_video_folder(folder_path)
+            elif hasattr(current_tab, 'set_video_path'):
+                current_tab.set_video_path(folder_path)
+            self.statusbar.showMessage(f"Loaded folder: {os.path.basename(folder_path)}")
+
     def _open_report(self):
         """Open a report JSON file."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Report File",
-            "",
+            self, "Open Report File", "",
             "JSON Files (*.json);;All Files (*.*)"
         )
-        
         if file_path:
-            self.tab_widget.setCurrentIndex(2)  # Switch to Report Viewer
+            self.tab_widget.setCurrentIndex(2)
             self.report_viewer.load_report(file_path)
             self.statusbar.showMessage(f"Loaded report: {os.path.basename(file_path)}")
-            
+
     def _show_settings(self):
         """Show the settings dialog."""
         dialog = SettingsDialog(self)
         if dialog.exec():
             self.statusbar.showMessage("Settings saved")
-            # Notify tabs to reload config
             self.classroom_tab.reload_config()
             self.crossday_tab.reload_config()
-            
+
     def _show_about(self):
         """Show the about dialog."""
+        center_id = self.config.get("center_id", "N/A")
         QMessageBox.about(
-            self,
-            "About TataStrive Analytics",
+            self, "About TataStrive Analytics",
             "<h2>TataStrive Analytics</h2>"
             "<p>Version 1.0.0</p>"
+            f"<p><b>Center ID:</b> {center_id}</p>"
             "<p>A professional desktop application for:</p>"
             "<ul>"
             "<li>Classroom engagement analysis</li>"
             "<li>Attendance tracking</li>"
+            "<li>Automatic BigQuery reporting</li>"
             "</ul>"
             "<p>Built with PyQt6 and Python.</p>"
         )
-        
+
+    # ──────────────────────────────────────────────────────────────────
+    # Analysis completion handlers
+    # ──────────────────────────────────────────────────────────────────
+
     def _on_classroom_complete(self, report_path: str):
-        """Handle classroom analysis completion."""
+        """Handle classroom analysis completion — view report + auto-sync."""
         self.statusbar.showMessage(f"Analysis complete: {report_path}")
-        reply = QMessageBox.question(
-            self,
-            "Analysis Complete",
-            "Classroom analysis completed successfully.\n\nWould you like to view the report?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.tab_widget.setCurrentIndex(2)
-            self.report_viewer.load_report(report_path)
-            
+        # Auto-sync the new report immediately
+        self._sync_single_report(report_path)
+        if not self.classroom_tab.is_monitoring():
+            reply = QMessageBox.question(
+                self, "Analysis Complete",
+                "Classroom analysis completed successfully.\n\nWould you like to view the report?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.tab_widget.setCurrentIndex(2)
+                self.report_viewer.load_report(report_path)
+
     def _on_crossday_complete(self, report_path: str):
-        """Handle attendance analysis completion."""
+        """Handle attendance analysis completion — view report + auto-sync."""
         self.statusbar.showMessage(f"Analysis complete: {report_path}")
-        reply = QMessageBox.question(
-            self,
-            "Analysis Complete",
-            "Attendance analysis completed successfully.\n\nWould you like to view the report?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.tab_widget.setCurrentIndex(2)
-            self.report_viewer.load_report(report_path)
-            
+        # Auto-sync the new report immediately
+        self._sync_single_report(report_path)
+        if not self.crossday_tab.is_monitoring():
+            reply = QMessageBox.question(
+                self, "Analysis Complete",
+                "Attendance analysis completed successfully.\n\nWould you like to view the report?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.tab_widget.setCurrentIndex(2)
+                self.report_viewer.load_report(report_path)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Close
+    # ──────────────────────────────────────────────────────────────────
+
     def closeEvent(self, event: QCloseEvent):
         """Handle window close event."""
-        # Check if any analysis is running
         if self.classroom_tab.is_running() or self.crossday_tab.is_running():
             reply = QMessageBox.question(
-                self,
-                "Confirm Exit",
+                self, "Confirm Exit",
                 "An analysis is currently running.\n\nAre you sure you want to exit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.No:
                 event.ignore()
                 return
-            # Stop running analyses
             self.classroom_tab.stop_analysis()
             self.crossday_tab.stop_analysis()
-            
+
         self._save_geometry()
         event.accept()
+

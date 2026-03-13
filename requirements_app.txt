@@ -31,6 +31,14 @@ groq>=0.4.0
 # Environment variables
 python-dotenv
 
+# BigQuery sync (Tata Strive Analytics cloud reporting)
+google-cloud-bigquery>=3.10.0
+google-auth>=2.20.0
+
+# Optional: Intel CPU acceleration (2-3x faster on Intel CPUs)
+# Uncomment to install: pip install openvino
+openvino>=2024.0.0
+
 # Packaging
 pyinstaller>=6.0.0
 pefile  # Required by PyInstaller on Windows

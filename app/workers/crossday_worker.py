@@ -6,6 +6,7 @@ Runs the attendance pipeline in a background thread.
 import os
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional, Callable
 
 import numpy as np
@@ -59,7 +60,12 @@ class CrossDayWorker(QThread):
                 self.error.emit(err_msg)
                 return
             
-            # Create analyzer with callbacks
+            # Preview: PyQt callback or cv2.imshow (cv2 is faster, no cross-thread overhead)
+            inference_cfg = self.config.get("inference") or {}
+            preview_mode = inference_cfg.get("preview_mode", "pyqt")
+            use_cv2_preview = self.preview_enabled and preview_mode == "cv2"
+            frame_cb = None if use_cv2_preview else (self._emit_frame if self.preview_enabled else None)
+
             analyzer = CrossDayAnalyzerWithCallbacks(
                 video_path=self.video_path,
                 output_dir=self.output_dir,
@@ -67,7 +73,8 @@ class CrossDayWorker(QThread):
                 config=self.config,
                 progress_callback=self._emit_progress,
                 log_callback=self._emit_log,
-                frame_callback=self._emit_frame if self.preview_enabled else None,
+                frame_callback=frame_cb,
+                use_cv2_preview=use_cv2_preview,
                 stop_check=self._check_stop
             )
             
@@ -121,6 +128,7 @@ class CrossDayAnalyzerWithCallbacks:
         progress_callback: Optional[Callable] = None,
         log_callback: Optional[Callable] = None,
         frame_callback: Optional[Callable] = None,
+        use_cv2_preview: bool = False,
         stop_check: Optional[Callable] = None
     ):
         self.video_path = video_path
@@ -130,6 +138,7 @@ class CrossDayAnalyzerWithCallbacks:
         self.progress_callback = progress_callback
         self.log_callback = log_callback
         self.frame_callback = frame_callback
+        self.use_cv2_preview = use_cv2_preview
         self.stop_check = stop_check
         
     def _log(self, message: str, level: str = "info"):
@@ -158,6 +167,7 @@ class CrossDayAnalyzerWithCallbacks:
         import pickle
         import shutil
         from datetime import datetime, timedelta
+        from pathlib import Path
         from scipy.spatial.distance import cosine
         from ultralytics import YOLO
         
@@ -200,12 +210,57 @@ class CrossDayAnalyzerWithCallbacks:
         self._log(f"Running on: {device}")
         self._log(f"Mode: {RUN_MODE}, Date: {CURRENT_DATE}")
         
-        # Load models
+        # Inference optimization config (OpenVINO for Intel CPU speedup)
+        inference_cfg = self.config.get("inference") or {}
+        use_openvino = inference_cfg.get("use_openvino", True) and device == 'cpu'
+        if use_openvino:
+            try:
+                v = tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2])
+                if v < (2, 1):
+                    use_openvino = False
+                    self._log("OpenVINO requires torch>=2.1 (you have torch {}). Using PyTorch.".format(torch.__version__.split("+")[0]), "info")
+            except Exception:
+                use_openvino = False
+        yolo_imgsz = inference_cfg.get("yolo_imgsz", 416)
+        face_det_size = inference_cfg.get("face_det_size", 416)
+        frame_skip = max(1, int(inference_cfg.get("frame_skip", 1)))  # Face detection every Nth frame
+        
+        # Load person detection model (YOLO)
         self._log("Loading person detection model...")
-        person_model = YOLO("yolov8n.pt")
+        person_model = None
+        if use_openvino:
+            try:
+                project_root = Path(__file__).resolve().parent.parent.parent
+                ov_cache = project_root / "Models" / f"yolov8n_ov_{yolo_imgsz}"
+                ov_model_dir = ov_cache / "yolov8n_openvino_model"
+                xml_files = list(ov_cache.glob("**/*.xml"))
+                if xml_files:
+                    ov_path = str(xml_files[0].parent)
+                    person_model = YOLO(ov_path)
+                    self._log(f"Using OpenVINO YOLO (imgsz={yolo_imgsz})", "success")
+                else:
+                    base = YOLO("yolov8n.pt")
+                    self._log("Exporting YOLO to OpenVINO (one-time, ~1 min)...", "info")
+                    ov_cache.mkdir(parents=True, exist_ok=True)
+                    orig_cwd = os.getcwd()
+                    try:
+                        os.chdir(str(ov_cache))
+                        base.export(format="openvino", imgsz=yolo_imgsz, half=True)
+                    finally:
+                        os.chdir(orig_cwd)
+                    xml_files = list(ov_cache.glob("**/*.xml"))
+                    if xml_files:
+                        person_model = YOLO(str(xml_files[0].parent))
+                        self._log(f"OpenVINO export done. Using imgsz={yolo_imgsz}", "success")
+            except Exception as e:
+                self._log(f"OpenVINO YOLO failed ({e}), using PyTorch", "warning")
+        if person_model is None:
+            person_model = YOLO("yolov8n.pt")
+        if device == 'cuda':
+            self._log("YOLO using GPU (CUDA)", "success")
         
         # FaceAnalysis: load only if onnxruntime + InsightFace available
-        # Uses same settings as OLDCODE/main.py: buffalo_l model, det_size=(640,640)
+        # Uses buffalo_l; det_size from config (416=fast, 640=quality)
         if face_app == "pending":
             self._log("Loading face analysis model...")
             try:
@@ -215,13 +270,22 @@ class CrossDayAnalyzerWithCallbacks:
                             name='buffalo_l',
                             providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
                         )
-                        face_app.prepare(ctx_id=0, det_size=(640, 640))
+                        face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
                     except Exception as e:
                         self._log(f"CUDA failed ({e}), falling back to CPU...", "warning")
                         face_app = None
                 if face_app is None or face_app == "pending":
-                    face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-                    face_app.prepare(ctx_id=0, det_size=(640, 640))  # ctx_id=0 same as old code
+                    face_providers = ['CPUExecutionProvider']
+                    if use_openvino:
+                        try:
+                            import onnxruntime as _ort
+                            if 'OpenVINOExecutionProvider' in _ort.get_available_providers():
+                                face_providers = ['OpenVINOExecutionProvider', 'CPUExecutionProvider']
+                                self._log("Using OpenVINO for face detection", "info")
+                        except Exception:
+                            pass
+                    face_app = FaceAnalysis(name='buffalo_l', providers=face_providers)
+                    face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
                 self._log("Face analysis model loaded", "success")
             except Exception as e:
                 self._log(f"Face model failed ({e}), using simplified mode.", "warning")
@@ -247,6 +311,15 @@ class CrossDayAnalyzerWithCallbacks:
             g_ids = [k for k in global_gallery.keys() if k.startswith('G_')]
             if g_ids:
                 next_global_id = len(g_ids) + 1
+            # Restore next_visitor_id from existing visitor IDs for this day label
+            visitor_prefix = f"{DAY_LABEL}_V_"
+            v_ids = [k for k in global_gallery.keys() if k.startswith(visitor_prefix)]
+            if v_ids:
+                try:
+                    nums = [int(k.split("_")[-1]) for k in v_ids]
+                    next_visitor_id = max(nums) + 1
+                except (ValueError, IndexError):
+                    pass
             self._log(f"Loaded {len(global_gallery)} identities", "success")
         else:
             self._log("No existing database found, starting fresh")
@@ -277,9 +350,31 @@ class CrossDayAnalyzerWithCallbacks:
         # Resize if needed
         target_w, target_h = (1280, 720) if w > 1920 else (w, h)
         
-        # Output video
-        output_video_path = os.path.join(self.output_dir, f"{CURRENT_DATE.replace('-', '_')}_output.mp4")
-        out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (target_w, target_h))
+        # Output video (optional - skip for faster processing)
+        # mp4v can truncate long videos on Windows; use AVI/MJPG for reliability
+        crossday_cfg = self.config.get("crossday") or {}
+        save_output_video = crossday_cfg.get("save_output_video", self.config.get("save_output_video", True))
+        use_avi = crossday_cfg.get("use_avi_output", False)
+        if total_frames > 5000 and not use_avi:
+            use_avi = True
+            self._log("Long video detected. Using AVI format for reliable output (mp4v can truncate on Windows).", "info")
+        ext = '.avi' if use_avi else '.mp4'
+        output_video_path = os.path.join(self.output_dir, f"{CURRENT_DATE.replace('-', '_')}_output{ext}")
+        out = None
+        if save_output_video:
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG') if use_avi else cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_video_path, fourcc, fps, (target_w, target_h))
+            if not out.isOpened():
+                self._log("VideoWriter failed. Trying alternate format...", "warning")
+                output_video_path = os.path.join(self.output_dir, f"{CURRENT_DATE.replace('-', '_')}_output.avi")
+                out = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*'MJPG'), fps, (target_w, target_h))
+            if not out.isOpened():
+                self._log("VideoWriter failed. Output video disabled.", "warning")
+                out = None
+            else:
+                self._log(f"Output video: {output_video_path}", "info")
+        if not save_output_video:
+            self._log("Output video disabled (report and DB only)", "info")
         
         # Helper functions
         def match_face_to_body(face_bbox, person_tracks):
@@ -363,57 +458,54 @@ class CrossDayAnalyzerWithCallbacks:
         
         # Process frames
         frame_idx = 0
+        frames_written = 0
         face_fail_streak = 0
         FACE_FAIL_FALLBACK = 30  # After this many consecutive face_app.get() failures, fall back to tracking-only
         effective_face_mode = face_app is not None  # Will switch to False if face_app.get fails repeatedly
-        while cap.isOpened():
-            if self._should_stop():
-                break
-            
-            success, frame = cap.read()
-            if not success:
-                break
-            
-            if w != target_w:
-                frame = cv2.resize(frame, (target_w, target_h))
-            
-            timestamp = datetime.fromtimestamp(frame_idx / fps).strftime('%H:%M:%S')
-            
-            # Progress (0-90% for main loop; 90-100% reserved for save/report)
-            if frame_idx % 100 == 0 and total_frames > 0:
-                progress = min(90, int(frame_idx / total_frames * 90))
-                self._progress(progress, f"Processing frame {frame_idx}/{total_frames}")
-            
-            # Person tracking
-            results = person_model.track(frame, persist=True, classes=[0], tracker="botsort.yaml", verbose=False)
-            person_tracks = []
-            
-            if results[0].boxes.id is not None:
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                track_ids = results[0].boxes.id.int().cpu().numpy()
+        cv2_preview_window = "Attendance Preview" if self.use_cv2_preview else None
+        if frame_skip > 1:
+            self._log(f"Face detection every {frame_skip} frames (faster, slight accuracy trade-off)", "info")
+        if self.use_cv2_preview:
+            self._log("Using cv2.imshow preview (faster than PyQt)", "info")
+        executor = ThreadPoolExecutor(max_workers=2)
+        try:
+            while cap.isOpened():
+                if self._should_stop():
+                    break
                 
-                for box, t_id in zip(boxes, track_ids):
-                    t_id = int(t_id)
-                    person_tracks.append({'track_id': t_id, 'bbox': box})
-                    
-                    if t_id not in track_vault:
-                        track_vault[t_id] = {
-                            "embeddings": [], "global_id": None,
-                            "first_seen": timestamp, "last_seen": timestamp,
-                            "frames": 0, "bbox": box
-                        }
-                    track_vault[t_id]["last_seen"] = timestamp
-                    track_vault[t_id]["frames"] += 1
-                    track_vault[t_id]["bbox"] = box
-                    
-                    gid = track_vault[t_id]["global_id"]
-                    if gid:
-                        log_attendance(gid, timestamp)
-            
-            # Face detection and embedding (skip if simplified mode)
-            if face_app is not None and effective_face_mode:
+                success, frame = cap.read()
+                if not success:
+                    break
+                
+                if w != target_w:
+                    frame = cv2.resize(frame, (target_w, target_h))
+                
+                timestamp = datetime.fromtimestamp(frame_idx / fps).strftime('%H:%M:%S')
+                
+                # Progress (0-90% for main loop; 90-100% reserved for save/report)
+                if frame_idx % 100 == 0 and total_frames > 0:
+                    progress = min(90, int(frame_idx / total_frames * 90))
+                    self._progress(progress, f"Processing frame {frame_idx}/{total_frames}")
+                
+                # Parallel: YOLO tracking + Face detection (independent, run concurrently)
+                def run_yolo():
+                    return person_model.track(frame, persist=True, classes=[0], tracker="botsort.yaml", verbose=False, imgsz=yolo_imgsz, device=device)
+
+                def run_face():
+                    if face_app is None or not effective_face_mode or (frame_idx % frame_skip) != 0:
+                        return []
+                    try:
+                        return face_app.get(frame)
+                    except (AttributeError, ValueError, Exception):
+                        raise
+
+                person_tracks = []
+                faces = []
+                yolo_future = executor.submit(run_yolo)
+                face_future = executor.submit(run_face)
+                results = yolo_future.result()
                 try:
-                    faces = face_app.get(frame)
+                    faces = face_future.result()
                     face_fail_streak = 0
                 except (AttributeError, ValueError, Exception) as e:
                     faces = []
@@ -423,143 +515,163 @@ class CrossDayAnalyzerWithCallbacks:
                     if face_fail_streak >= FACE_FAIL_FALLBACK:
                         effective_face_mode = False
                         self._log(
-                            f"Face detection failing repeatedly. Switching to tracking-only mode (like simplified mode).",
+                            "Face detection failing repeatedly. Switching to tracking-only mode.",
                             "warning"
                         )
-            else:
-                faces = []
-            assigned_tracks = set()
-            
-            for face in faces:
-                face_width = face.bbox[2] - face.bbox[0]
-                if face.det_score < 0.75 or face_width < 40:
-                    continue
-                
-                # Face pose quality checks (same as cross_day_code)
-                if face.kps is not None:
-                    l_eye, r_eye, nose = face.kps[0], face.kps[1], face.kps[2]
-                    eye_dist = np.linalg.norm(l_eye - r_eye)
-                    if face_width > 0 and (eye_dist / face_width) < 0.35:
-                        continue
-                    eye_center_x = (l_eye[0] + r_eye[0]) / 2
-                    nose_offset = abs(nose[0] - eye_center_x)
-                    if nose_offset > (eye_dist * 0.5):
-                        continue
-                
-                matched_t_id = match_face_to_body(face.bbox, person_tracks)
-                
-                if matched_t_id is not None and matched_t_id not in assigned_tracks:
-                    assigned_tracks.add(matched_t_id)
-                    emb = face.embedding
-                    
-                    should_add = True
-                    if len(track_vault[matched_t_id]["embeddings"]) > 3:
-                        track_avg = np.mean(track_vault[matched_t_id]["embeddings"], axis=0)
-                        track_avg = track_avg / np.linalg.norm(track_avg)
-                        if cosine(emb, track_avg) > T_OUTLIER:
-                            should_add = False
-                    
-                    if should_add:
-                        track_vault[matched_t_id]["embeddings"].append(emb)
-                        gid = track_vault[matched_t_id]["global_id"]
+
+                if results[0].boxes.id is not None:
+                    boxes = results[0].boxes.xyxy.cpu().numpy()
+                    track_ids = results[0].boxes.id.int().cpu().numpy()
+                    for box, t_id in zip(boxes, track_ids):
+                        t_id = int(t_id)
+                        person_tracks.append({'track_id': t_id, 'bbox': box})
+                        if t_id not in track_vault:
+                            track_vault[t_id] = {
+                                "embeddings": [], "global_id": None,
+                                "first_seen": timestamp, "last_seen": timestamp,
+                                "frames": 0, "bbox": box
+                            }
+                        track_vault[t_id]["last_seen"] = timestamp
+                        track_vault[t_id]["frames"] += 1
+                        track_vault[t_id]["bbox"] = box
+                        gid = track_vault[t_id]["global_id"]
                         if gid:
-                            update_exemplars(gid, emb)
-                        
-                        if len(track_vault[matched_t_id]["embeddings"]) == 1:
-                            fx1, fy1, fx2, fy2 = map(int, face.bbox)
-                            face_img = frame[max(0, fy1):fy2, max(0, fx1):fx2]
-                            if face_img.size > 0:
-                                cv2.imwrite(f"{crops_dir}/track_{matched_t_id}.jpg", face_img)
-            
-            # Identity assignment
-            active_gids_in_frame = set(
-                track_vault[pt['track_id']]["global_id"]
-                for pt in person_tracks
-                if track_vault[pt['track_id']]["global_id"] is not None
-            )
-            
-            for pt in person_tracks:
-                t_id = pt['track_id']
-                t_data = track_vault[t_id]
-                x1, y1, x2, y2 = map(int, pt['bbox'])
+                            log_attendance(gid, timestamp)
+                assigned_tracks = set()
                 
-                # Simplified/tracking-only mode: assign ID after 5 frames when face detection unavailable
-                if (face_app is None or not effective_face_mode) and t_data["global_id"] is None and t_data["frames"] >= 5:
-                    if RUN_MODE == "BUILD_DB":
-                        new_gid = f"G_{next_global_id:03d}"
-                        next_global_id += 1
-                    else:
-                        new_gid = f"{DAY_LABEL}_V_{next_visitor_id:03d}"
-                        next_visitor_id += 1
-                    global_gallery[new_gid] = {
-                        "exemplars": [], "attendance": {}, "join_date": CURRENT_DATE
-                    }
-                    t_data["global_id"] = new_gid
-                    log_attendance(new_gid, timestamp)
+                for face in faces:
+                    face_width = face.bbox[2] - face.bbox[0]
+                    if face.det_score < 0.75 or face_width < 40:
+                        continue
+                    if face.kps is not None:
+                        l_eye, r_eye, nose = face.kps[0], face.kps[1], face.kps[2]
+                        eye_dist = np.linalg.norm(l_eye - r_eye)
+                        if face_width > 0 and (eye_dist / face_width) < 0.35:
+                            continue
+                        eye_center_x = (l_eye[0] + r_eye[0]) / 2
+                        nose_offset = abs(nose[0] - eye_center_x)
+                        if nose_offset > (eye_dist * 0.5):
+                            continue
+                    matched_t_id = match_face_to_body(face.bbox, person_tracks)
+                    if matched_t_id is not None and matched_t_id not in assigned_tracks:
+                        assigned_tracks.add(matched_t_id)
+                        emb = face.embedding
+                        should_add = True
+                        if len(track_vault[matched_t_id]["embeddings"]) > 3:
+                            track_avg = np.mean(track_vault[matched_t_id]["embeddings"], axis=0)
+                            track_avg = track_avg / np.linalg.norm(track_avg)
+                            if cosine(emb, track_avg) > T_OUTLIER:
+                                should_add = False
+                        if should_add:
+                            track_vault[matched_t_id]["embeddings"].append(emb)
+                            gid = track_vault[matched_t_id]["global_id"]
+                            if gid:
+                                update_exemplars(gid, emb)
+                            if len(track_vault[matched_t_id]["embeddings"]) == 1:
+                                fx1, fy1, fx2, fy2 = map(int, face.bbox)
+                                face_img = frame[max(0, fy1):fy2, max(0, fx1):fx2]
+                                if face_img.size > 0:
+                                    cv2.imwrite(f"{crops_dir}/track_{matched_t_id}.jpg", face_img)
                 
-                if t_data["global_id"] is None and len(t_data["embeddings"]) >= MIN_SAMPLES:
-                    track_centroid = np.mean(t_data["embeddings"], axis=0)
-                    track_centroid = track_centroid / np.linalg.norm(track_centroid)
-                    
-                    best_id, best_sim = find_match_with_margin(track_centroid, active_gids_in_frame)
-                    
-                    if best_id:
-                        t_data["global_id"] = best_id
-                        active_gids_in_frame.add(best_id)
-                        log_attendance(best_id, timestamp)
-                    elif best_sim < T_NEW_ID:
+                # Identity assignment
+                active_gids_in_frame = set(
+                    track_vault[pt['track_id']]["global_id"]
+                    for pt in person_tracks
+                    if track_vault[pt['track_id']]["global_id"] is not None
+                )
+                
+                for pt in person_tracks:
+                    t_id = pt['track_id']
+                    t_data = track_vault[t_id]
+                    x1, y1, x2, y2 = map(int, pt['bbox'])
+                    if (face_app is None or not effective_face_mode) and t_data["global_id"] is None and t_data["frames"] >= 5:
                         if RUN_MODE == "BUILD_DB":
                             new_gid = f"G_{next_global_id:03d}"
                             next_global_id += 1
                         else:
                             new_gid = f"{DAY_LABEL}_V_{next_visitor_id:03d}"
                             next_visitor_id += 1
-                        
-                        global_gallery[new_gid] = {"exemplars": [track_centroid]}
+                        global_gallery[new_gid] = {
+                            "exemplars": [], "attendance": {}, "join_date": CURRENT_DATE
+                        }
                         t_data["global_id"] = new_gid
-                        active_gids_in_frame.add(new_gid)
                         log_attendance(new_gid, timestamp)
-                    
-                    if t_data["global_id"] and RUN_MODE == "EVAL_DAY":
-                        old_path = f"{crops_dir}/track_{t_id}.jpg"
-                        new_path = f"{verification_dir}/{t_data['global_id']}_track_{t_id}.jpg"
-                        if os.path.exists(old_path) and not os.path.exists(new_path):
-                            shutil.copy(old_path, new_path)
+                    if t_data["global_id"] is None and len(t_data["embeddings"]) >= MIN_SAMPLES:
+                        track_centroid = np.mean(t_data["embeddings"], axis=0)
+                        track_centroid = track_centroid / np.linalg.norm(track_centroid)
+                        best_id, best_sim = find_match_with_margin(track_centroid, active_gids_in_frame)
+                        if best_id:
+                            t_data["global_id"] = best_id
+                            active_gids_in_frame.add(best_id)
+                            log_attendance(best_id, timestamp)
+                        elif best_sim < T_NEW_ID:
+                            if RUN_MODE == "BUILD_DB":
+                                new_gid = f"G_{next_global_id:03d}"
+                                next_global_id += 1
+                            else:
+                                new_gid = f"{DAY_LABEL}_V_{next_visitor_id:03d}"
+                                next_visitor_id += 1
+                            global_gallery[new_gid] = {"exemplars": [track_centroid]}
+                            t_data["global_id"] = new_gid
+                            active_gids_in_frame.add(new_gid)
+                            log_attendance(new_gid, timestamp)
+                        if t_data["global_id"] and RUN_MODE == "EVAL_DAY":
+                            old_path = f"{crops_dir}/track_{t_id}.jpg"
+                            new_path = f"{verification_dir}/{t_data['global_id']}_track_{t_id}.jpg"
+                            if os.path.exists(old_path) and not os.path.exists(new_path):
+                                shutil.copy(old_path, new_path)
+                    if save_output_video:
+                        gid = t_data["global_id"]
+                        if gid:
+                            if gid.startswith("G_"):
+                                color = (0, 255, 0)
+                            else:
+                                color = (255, 0, 0)
+                            label = f"ID: {gid}"
+                        else:
+                            color = (0, 165, 255)
+                            if effective_face_mode:
+                                progress_count = min(len(t_data['embeddings']), MIN_SAMPLES)
+                                label = f"Scanning: {progress_count}/{MIN_SAMPLES}"
+                            else:
+                                label = f"Scanning: {min(t_data['frames'], 5)}/5"
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 
-                # Draw bounding box
-                gid = t_data["global_id"]
-                if gid:
-                    if gid.startswith("G_"):
-                        color = (0, 255, 0)  # Green for returning
-                    else:
-                        color = (255, 0, 0)  # Blue for visitors
-                    label = f"ID: {gid}"
-                else:
-                    color = (0, 165, 255)  # Orange for scanning
-                    if effective_face_mode:
-                        progress_count = min(len(t_data['embeddings']), MIN_SAMPLES)
-                        label = f"Scanning: {progress_count}/{MIN_SAMPLES}"
-                    else:
-                        label = f"Scanning: {min(t_data['frames'], 5)}/5"
-                
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            
-            out.write(frame)
-            
-            # Send frame for real-time preview (every frame)
-            if self.frame_callback:
-                preview_frame = frame.copy()
-                h, w = preview_frame.shape[:2]
-                if w > 480:
-                    preview_frame = cv2.resize(preview_frame, (480, int(h * 480 / w)))
-                preview_frame = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
-                self.frame_callback(preview_frame, True)
-            
-            frame_idx += 1
-        
+                if out is not None:
+                    out.write(frame)
+                    frames_written += 1
+                if self.use_cv2_preview and frame_idx % 5 == 0:
+                    preview_frame = frame.copy()
+                    h, w = preview_frame.shape[:2]
+                    if w > 640:
+                        preview_frame = cv2.resize(preview_frame, (640, int(h * 640 / w)))
+                    cv2.imshow(cv2_preview_window, preview_frame)
+                    cv2.waitKey(1)
+                elif self.frame_callback and frame_idx % 5 == 0:
+                    preview_frame = frame.copy()
+                    h, w = preview_frame.shape[:2]
+                    if w > 480:
+                        preview_frame = cv2.resize(preview_frame, (480, int(h * 480 / w)))
+                    preview_frame = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
+                    self.frame_callback(preview_frame, True)
+                frame_idx += 1
+        finally:
+            executor.shutdown(wait=True)
+        if self.use_cv2_preview:
+            try:
+                cv2.destroyWindow(cv2_preview_window)
+            except Exception:
+                pass
         cap.release()
-        out.release()
+        if out is not None:
+            out.release()
+            self._log(f"Output video: {frames_written} frames written (expected {total_frames})", "info")
+            if frames_written != total_frames:
+                self._log(
+                    f"WARNING: Frame count mismatch. If output is shorter than input, try Settings > Performance > save as AVI, or install FFmpeg for better MP4 support.",
+                    "warning"
+                )
         
         if self._should_stop():
             return ""
@@ -606,7 +718,7 @@ class CrossDayAnalyzerWithCallbacks:
             try:
                 td = datetime.strptime(exit_str, fmt) - datetime.strptime(entry_str, fmt)
                 return int(td.total_seconds())
-            except:
+            except (ValueError, TypeError):
                 return 0
         
         report = {
@@ -678,6 +790,8 @@ class CrossDayAnalyzerWithCallbacks:
             json.dump(report, f, indent=4)
         
         self._log(f"Report saved: {report_path}", "success")
-        self._log(f"Output video: {output_video_path}", "success")
+        self._log("=== FINAL DAILY SUMMARY ===\n" + json.dumps(report["Counts"], indent=4), "info")
+        if save_output_video:
+            self._log(f"Output video: {output_video_path}", "success")
         
         return report_path

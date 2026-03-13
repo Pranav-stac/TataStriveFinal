@@ -9,9 +9,9 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QSpinBox, QDoubleSpinBox, QPushButton, QFrame, QSplitter,
     QRadioButton, QButtonGroup, QDateEdit, QLineEdit,
-    QSizePolicy, QMessageBox, QScrollArea
+    QSizePolicy, QMessageBox, QScrollArea, QCheckBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QDate
+from PyQt6.QtCore import Qt, pyqtSignal, QDate, QTimer
 
 from app.config import get_config
 from app.ui.widgets.file_picker import FilePicker, FolderPicker
@@ -23,11 +23,23 @@ class CrossDayTab(QWidget):
     """Tab for attendance analysis configuration and execution."""
     
     analysis_complete = pyqtSignal(str)  # Emits report path
+    VIDEO_EXTENSIONS = (".mp4", ".avi", ".mkv", ".mov", ".m4v", ".wmv")
     
     def __init__(self, parent: QWidget = None):
         super().__init__(parent)
         self.config = get_config()
         self._worker = None
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setInterval(5000)
+        self._watch_timer.timeout.connect(self._poll_video_folder)
+        self._pending_videos = []
+        self._known_videos = set()
+        self._size_probe = {}
+        self._current_video = ""
+        self._current_run_output_dir = ""
+        self._runtime_db_path = ""
+        self._is_monitoring = False
+        self._stop_requested = False
         self._setup_ui()
         self._load_config()
         
@@ -97,10 +109,9 @@ class CrossDayTab(QWidget):
         left_layout.addWidget(date_group)
         
         # File inputs
-        self.video_picker = FilePicker(
-            label="Video Input",
-            placeholder="Select a video file...",
-            file_filter="Video Files (*.mp4 *.avi *.mkv *.mov);;All Files (*.*)"
+        self.video_picker = FolderPicker(
+            label="Video Input Folder",
+            placeholder="Select a folder to watch for videos..."
         )
         self.video_picker.path_changed.connect(self._on_video_changed)
         left_layout.addWidget(self.video_picker)
@@ -189,6 +200,15 @@ class CrossDayTab(QWidget):
         
         left_layout.addWidget(config_group)
         
+        # Output options
+        output_group = QGroupBox("Output Options")
+        output_layout = QVBoxLayout(output_group)
+        self.save_video_checkbox = QCheckBox("Save annotated output video")
+        self.save_video_checkbox.setToolTip("Uncheck for faster processing (report and database only)")
+        self.save_video_checkbox.setChecked(True)
+        output_layout.addWidget(self.save_video_checkbox)
+        left_layout.addWidget(output_group)
+        
         # Video preview
         self.video_preview = VideoPreview()
         self.video_preview.preview_toggled.connect(self._on_preview_toggled)
@@ -240,9 +260,9 @@ class CrossDayTab(QWidget):
         self.visitor_upgrade_spin.setValue(crossday_config.get("visitor_upgrade_days", 3))
         
         # Load last paths
-        last_video = self.config.get("last_video_path", "")
-        if last_video:
-            self.video_picker.set_path(last_video)
+        last_folder = self.config.get("last_video_folder", "")
+        if last_folder:
+            self.video_picker.set_path(last_folder)
             
         last_db = self.config.get("last_db_path", "")
         if last_db:
@@ -252,8 +272,10 @@ class CrossDayTab(QWidget):
         if last_output:
             self.output_picker.set_path(last_output)
             
-        # Preview state
+        # Preview state (disabled by default for speed)
         self.video_preview.set_enabled(self.config.get("preview_enabled", False))
+        crossday_cfg = self.config.get_section("crossday") or {}
+        self.save_video_checkbox.setChecked(crossday_cfg.get("save_output_video", True))
         
         # Auto-generate day label
         self._update_day_label()
@@ -265,7 +287,8 @@ class CrossDayTab(QWidget):
         self.config.set("crossday.t_ratio_margin", self.t_ratio_margin_spin.value(), save=False)
         self.config.set("crossday.min_samples", self.min_samples_spin.value(), save=False)
         self.config.set("crossday.visitor_upgrade_days", self.visitor_upgrade_spin.value(), save=False)
-        self.config.set("last_video_path", self.video_picker.get_path(), save=False)
+        self.config.set("crossday.save_output_video", self.save_video_checkbox.isChecked(), save=False)
+        self.config.set("last_video_folder", self.video_picker.get_path(), save=False)
         self.config.set("last_db_path", self.db_picker.get_path(), save=False)
         self.config.set("last_output_dir", self.output_picker.get_path(), save=False)
         self.config.set("preview_enabled", self.video_preview.is_enabled(), save=True)
@@ -297,11 +320,10 @@ class CrossDayTab(QWidget):
         
     def _on_video_changed(self, path: str):
         """Handle video path change."""
-        if path and os.path.isfile(path):
+        if path and os.path.isdir(path):
             # Auto-set output directory if not set
             if not self.output_picker.get_path():
-                video_dir = os.path.dirname(path)
-                output_dir = os.path.join(video_dir, "Outputs")
+                output_dir = os.path.join(path, "Outputs")
                 self.output_picker.set_path(output_dir)
                 
     def _on_preview_toggled(self, enabled: bool):
@@ -317,21 +339,27 @@ class CrossDayTab(QWidget):
         
     def set_video_path(self, path: str):
         """Set the video path from external source."""
-        self.video_picker.set_path(path)
+        folder = os.path.dirname(path) if os.path.isfile(path) else path
+        if folder:
+            self.video_picker.set_path(folder)
+
+    def set_video_folder(self, folder_path: str):
+        """Set the video folder from external source."""
+        self.video_picker.set_path(folder_path)
         
     def _validate_inputs(self) -> bool:
         """Validate inputs before starting analysis."""
-        video_path = self.video_picker.get_path()
+        folder_path = self.video_picker.get_path()
         output_dir = self.output_picker.get_path()
         db_path = self.db_picker.get_path()
         is_eval_day = self.eval_day_radio.isChecked()
         
-        if not video_path:
-            QMessageBox.warning(self, "Validation Error", "Please select a video file.")
+        if not folder_path:
+            QMessageBox.warning(self, "Validation Error", "Please select a video input folder.")
             return False
             
-        if not os.path.isfile(video_path):
-            QMessageBox.warning(self, "Validation Error", "The selected video file does not exist.")
+        if not os.path.isdir(folder_path):
+            QMessageBox.warning(self, "Validation Error", "The selected video folder does not exist.")
             return False
             
         if not output_dir:
@@ -372,42 +400,33 @@ class CrossDayTab(QWidget):
         self.progress_panel.reset()
         
         mode = "BUILD_DB" if self.build_db_radio.isChecked() else "EVAL_DAY"
-        self.progress_panel.log_info(f"Starting attendance analysis in {mode} mode...")
-        
-        # Create and start worker
-        from app.workers.crossday_worker import CrossDayWorker
-        
-        self._worker = CrossDayWorker(
-            video_path=self.video_picker.get_path(),
-            output_dir=output_dir,
-            db_path=self.db_picker.get_path(),
-            config={
-                "run_mode": mode,
-                "current_date": self.date_edit.date().toString("yyyy-MM-dd"),
-                "day_label": self.day_label_edit.text().strip(),
-                "t_strict_merge": self.t_strict_merge_spin.value(),
-                "t_new_id": self.t_new_id_spin.value(),
-                "t_ratio_margin": self.t_ratio_margin_spin.value(),
-                "min_samples": self.min_samples_spin.value(),
-                "visitor_upgrade_days": self.visitor_upgrade_spin.value()
-            },
-            preview_enabled=self.video_preview.is_enabled()
-        )
-        
-        # Connect signals
-        self._worker.progress.connect(self._on_progress)
-        self._worker.log_message.connect(self._on_log)
-        self._worker.frame_ready.connect(self.video_preview.update_frame)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.error.connect(self._on_error)
-        
-        self._worker.start()
+        self.progress_panel.log_info(f"Folder listener started in {mode} mode. Waiting for new videos...")
+        self._runtime_db_path = self.db_picker.get_path().strip()
+        self._is_monitoring = True
+        self._stop_requested = False
+        self._pending_videos.clear()
+        self._known_videos.clear()
+        self._size_probe.clear()
+        self._current_video = ""
+        self._current_run_output_dir = ""
+        self._poll_video_folder()
+        self._watch_timer.start()
         
     def _stop_analysis(self):
         """Stop the running analysis."""
+        self._stop_requested = True
+        self._watch_timer.stop()
+        self._pending_videos.clear()
+        self._size_probe.clear()
         if self._worker and self._worker.isRunning():
-            self.progress_panel.log_warning("Stopping analysis...")
+            self.progress_panel.log_warning("Stopping active analysis...")
             self._worker.stop()
+        else:
+            self._is_monitoring = False
+            self._set_inputs_enabled(True)
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.progress_panel.log_info("Folder listener stopped.")
             
     def stop_analysis(self):
         """Public method to stop analysis."""
@@ -423,27 +442,147 @@ class CrossDayTab(QWidget):
         
     def _on_finished(self, report_path: str):
         """Handle analysis completion (or stop)."""
-        self._set_inputs_enabled(True)
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self._worker = None
         self.video_preview.clear()
         
         if report_path:
             self.progress_panel.update_progress(100, "Complete")
             self.progress_panel.log_success(f"Analysis complete! Report saved to: {report_path}")
+            self._update_runtime_db_after_run()
             self.analysis_complete.emit(report_path)
         else:
             self.progress_panel.log_warning("Analysis stopped by user.")
+        self._current_video = ""
+        self._current_run_output_dir = ""
+        if self._is_monitoring and not self._stop_requested:
+            self._try_start_next_video()
+        else:
+            self._is_monitoring = False
+            self._set_inputs_enabled(True)
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
         
     def _on_error(self, error_message: str):
         """Handle analysis error."""
-        self._set_inputs_enabled(True)
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self._worker = None
         self.video_preview.clear()
         
         self.progress_panel.log_error(f"Error: {error_message}")
-        QMessageBox.critical(self, "Analysis Error", f"An error occurred:\n\n{error_message}")
+        self._current_video = ""
+        self._current_run_output_dir = ""
+        if self._is_monitoring and not self._stop_requested:
+            self.progress_panel.log_warning("Listener continues. Waiting for next video...")
+            self._try_start_next_video()
+        else:
+            QMessageBox.critical(self, "Analysis Error", f"An error occurred:\n\n{error_message}")
+            self._is_monitoring = False
+            self._set_inputs_enabled(True)
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+
+    def _poll_video_folder(self):
+        """Scan input folder and enqueue new stable video files."""
+        folder = self.video_picker.get_path().strip()
+        if not folder or not os.path.isdir(folder):
+            return
+        try:
+            entries = sorted(os.listdir(folder))
+        except OSError as e:
+            self.progress_panel.log_warning(f"Could not read input folder: {e}")
+            return
+
+        for name in entries:
+            file_path = os.path.join(folder, name)
+            if not os.path.isfile(file_path):
+                continue
+            if not name.lower().endswith(self.VIDEO_EXTENSIONS):
+                continue
+            if file_path in self._known_videos or file_path in self._pending_videos or file_path == self._current_video:
+                continue
+            try:
+                size_now = os.path.getsize(file_path)
+            except OSError:
+                continue
+            previous_size = self._size_probe.get(file_path)
+            if previous_size is None or previous_size != size_now:
+                self._size_probe[file_path] = size_now
+                continue
+            self._size_probe.pop(file_path, None)
+            self._pending_videos.append(file_path)
+            self.progress_panel.log_info(f"Queued: {os.path.basename(file_path)}")
+        self._try_start_next_video()
+
+    def _try_start_next_video(self):
+        """Start processing next video in queue if idle."""
+        if not self._is_monitoring or self._stop_requested:
+            return
+        if self._worker and self._worker.isRunning():
+            return
+        if not self._pending_videos:
+            self.progress_panel.update_progress(0, "Waiting for new videos...")
+            return
+
+        from app.workers.crossday_worker import CrossDayWorker
+
+        video_path = self._pending_videos.pop(0)
+        self._known_videos.add(video_path)
+        self._current_video = video_path
+        base_output_dir = self.output_picker.get_path()
+        safe_name = os.path.splitext(os.path.basename(video_path))[0]
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_output_dir = os.path.join(base_output_dir, f"{safe_name}_{run_stamp}")
+        os.makedirs(run_output_dir, exist_ok=True)
+        self._current_run_output_dir = run_output_dir
+
+        mode = "BUILD_DB" if self.build_db_radio.isChecked() else "EVAL_DAY"
+        worker_config = {
+            "run_mode": mode,
+            "current_date": self.date_edit.date().toString("yyyy-MM-dd"),
+            "day_label": self.day_label_edit.text().strip(),
+            "t_strict_merge": self.t_strict_merge_spin.value(),
+            "t_new_id": self.t_new_id_spin.value(),
+            "t_ratio_margin": self.t_ratio_margin_spin.value(),
+            "min_samples": self.min_samples_spin.value(),
+            "visitor_upgrade_days": self.visitor_upgrade_spin.value()
+        }
+        inference_cfg = self.config.get_section("inference") or {}
+        worker_config["inference"] = inference_cfg
+        crossday_cfg = self.config.get_section("crossday") or {}
+        crossday_cfg["save_output_video"] = self.save_video_checkbox.isChecked()
+        worker_config["crossday"] = crossday_cfg
+
+        db_path = self._runtime_db_path if self._runtime_db_path else self.db_picker.get_path().strip()
+        self.progress_panel.reset()
+        self.progress_panel.log_info(f"Processing: {os.path.basename(video_path)}")
+        self._worker = CrossDayWorker(
+            video_path=video_path,
+            output_dir=run_output_dir,
+            db_path=db_path,
+            config=worker_config,
+            preview_enabled=self.video_preview.is_enabled()
+        )
+        self._worker.progress.connect(self._on_progress)
+        self._worker.log_message.connect(self._on_log)
+        self._worker.frame_ready.connect(self.video_preview.update_frame)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
+
+    def _update_runtime_db_after_run(self):
+        """Update runtime DB path after each successful run."""
+        if not self._current_run_output_dir:
+            return
+        mode = "BUILD_DB" if self.build_db_radio.isChecked() else "EVAL_DAY"
+        if mode == "BUILD_DB":
+            if self._runtime_db_path and os.path.isfile(self._runtime_db_path):
+                return
+            candidate = os.path.join(self._current_run_output_dir, "master_database.pkl")
+        else:
+            candidate = os.path.join(self._current_run_output_dir, "updated_master_database.pkl")
+        if os.path.isfile(candidate):
+            self._runtime_db_path = candidate
+            self.db_picker.set_path(candidate)
+            self.config.set("last_db_path", candidate)
         
     def _set_inputs_enabled(self, enabled: bool):
         """Enable or disable input widgets."""
@@ -459,7 +598,12 @@ class CrossDayTab(QWidget):
         self.t_ratio_margin_spin.setEnabled(enabled)
         self.min_samples_spin.setEnabled(enabled)
         self.visitor_upgrade_spin.setEnabled(enabled)
+        self.save_video_checkbox.setEnabled(enabled)
         
     def is_running(self) -> bool:
         """Check if analysis is running."""
-        return self._worker is not None and self._worker.isRunning()
+        return self._is_monitoring or (self._worker is not None and self._worker.isRunning())
+
+    def is_monitoring(self) -> bool:
+        """Check if folder listener is active."""
+        return self._is_monitoring
