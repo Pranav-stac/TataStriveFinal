@@ -64,12 +64,16 @@ ATTENDANCE_SCHEMA = [
     {"name": "unique_people",      "type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "returning_count",    "type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "visitor_count",      "type": "INTEGER",   "mode": "NULLABLE"},
+    {"name": "identified_students","type": "INTEGER",   "mode": "NULLABLE"},
     # Per-person (repeated)
     {"name": "person_id",          "type": "STRING",    "mode": "NULLABLE"},
     {"name": "person_type",        "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "engagement_id",      "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "batch",              "type": "STRING",    "mode": "NULLABLE"},
     {"name": "entry_time",         "type": "STRING",    "mode": "NULLABLE"},
     {"name": "exit_time",          "type": "STRING",    "mode": "NULLABLE"},
     {"name": "duration_seconds",   "type": "INTEGER",   "mode": "NULLABLE"},
+    {"name": "confidence_score",   "type": "FLOAT",     "mode": "NULLABLE"},
     {"name": "present_last_7_days","type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "last_present_date",  "type": "STRING",    "mode": "NULLABLE"},
     # Source
@@ -330,15 +334,16 @@ class BigQuerySyncService:
             "unique_people":    counts.get("unique_people", 0),
             "returning_count":  counts.get("returning", 0),
             "visitor_count":    counts.get("visitors", 0),
+            "identified_students": counts.get("identified_students", 0),
             "report_file":      fname,
         }
 
         if not people:
             row = dict(base)
             row.update({
-                "person_id": None, "person_type": None, "entry_time": None,
+                "person_id": None, "person_type": None, "engagement_id": None, "batch": None, "entry_time": None,
                 "exit_time": None, "duration_seconds": None,
-                "present_last_7_days": None, "last_present_date": None,
+                "confidence_score": None, "present_last_7_days": None, "last_present_date": None,
             })
             return [row]
 
@@ -348,9 +353,12 @@ class BigQuerySyncService:
             row.update({
                 "person_id":           person.get("id"),
                 "person_type":         person.get("type"),
+                "engagement_id":       person.get("engagement_id"),
+                "batch":               person.get("batch"),
                 "entry_time":          person.get("entry"),
                 "exit_time":           person.get("exit"),
                 "duration_seconds":    person.get("duration_sec"),
+                "confidence_score":    person.get("confidence_score"),
                 "present_last_7_days": person.get("present_last_7_days"),
                 "last_present_date":   person.get("last_present_date"),
             })

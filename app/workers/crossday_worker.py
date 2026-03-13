@@ -165,6 +165,7 @@ class CrossDayAnalyzerWithCallbacks:
         import numpy as np
         import json
         import pickle
+        import re
         import shutil
         from datetime import datetime, timedelta
         from pathlib import Path
@@ -204,6 +205,27 @@ class CrossDayAnalyzerWithCallbacks:
         MAX_EXEMPLARS = 5
         T_OUTLIER = 0.6
         VISITOR_UPGRADE_DAYS = self.config.get("visitor_upgrade_days", 3)
+        crossday_cfg = self.config.get("crossday") or {}
+        T_MATCH_STUDENT = float(crossday_cfg.get("t_match_student", 0.40))
+        student_db_path = str(crossday_cfg.get("student_db_path", "") or "").strip()
+        if not student_db_path:
+            project_root = Path(__file__).resolve().parent.parent.parent
+            auto_candidates = [
+                project_root / "pliswork_4batch_master_db.pkl",
+                project_root / "4batches_student_embeddings.pkl",
+                project_root / "Models" / "pliswork_4batch_master_db.pkl",
+                project_root / "Models" / "4batches_student_embeddings.pkl",
+            ]
+            student_db_path = next((str(p) for p in auto_candidates if p.exists()), "")
+        enable_ocr_timestamp = bool(crossday_cfg.get("enable_ocr_timestamp", False))
+        ocr_interval = max(1, int(crossday_cfg.get("ocr_interval", 30)))
+        timestamp_coords = crossday_cfg.get("timestamp_coords", [0, 15, 600, 90])
+        if not isinstance(timestamp_coords, (list, tuple)) or len(timestamp_coords) != 4:
+            timestamp_coords = [0, 15, 600, 90]
+        try:
+            timestamp_coords = tuple(int(v) for v in timestamp_coords)
+        except (TypeError, ValueError):
+            timestamp_coords = (0, 15, 600, 90)
         
         # Device setup (GPU when available, else CPU - same logic on both)
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -292,6 +314,17 @@ class CrossDayAnalyzerWithCallbacks:
                 face_app = None
         if face_app is None:
             self._log("Running in simplified mode (track-only, no face matching)", "info")
+
+        # Optional OCR model for camera timestamp extraction.
+        ocr_reader = None
+        if enable_ocr_timestamp:
+            try:
+                import easyocr
+                ocr_reader = easyocr.Reader(['en'], gpu=False)
+                self._log(f"OCR timestamp enabled (interval={ocr_interval}, roi={timestamp_coords})", "success")
+            except Exception as e:
+                self._log(f"EasyOCR unavailable ({e}). Falling back to video timeline timestamps.", "warning")
+                enable_ocr_timestamp = False
         
         # Data structures
         global_gallery = {}
@@ -299,6 +332,7 @@ class CrossDayAnalyzerWithCallbacks:
         next_global_id = 1
         next_visitor_id = 1
         operational_dates = []
+        student_db = {}
         
         # Load existing database (same as cross_day_code - no try/except)
         if os.path.exists(self.db_path):
@@ -323,6 +357,17 @@ class CrossDayAnalyzerWithCallbacks:
             self._log(f"Loaded {len(global_gallery)} identities", "success")
         else:
             self._log("No existing database found, starting fresh")
+
+        if student_db_path:
+            if os.path.exists(student_db_path):
+                try:
+                    with open(student_db_path, 'rb') as f:
+                        student_db = pickle.load(f)
+                    self._log(f"Loaded Student DB: {len(student_db)} enrolled faces.", "success")
+                except Exception as e:
+                    self._log(f"Failed to load student DB ({e}). Student mapping disabled.", "warning")
+            else:
+                self._log(f"Student DB not found at: {student_db_path}", "warning")
         
         if RUN_MODE == "BUILD_DB" and CURRENT_DATE not in operational_dates:
             operational_dates.append(CURRENT_DATE)
@@ -332,8 +377,7 @@ class CrossDayAnalyzerWithCallbacks:
         crops_dir = os.path.join(self.output_dir, f"crops_{CURRENT_DATE.replace('-', '')}")
         verification_dir = os.path.join(self.output_dir, "Verification_Matches")
         os.makedirs(crops_dir, exist_ok=True)
-        if RUN_MODE == "EVAL_DAY":
-            os.makedirs(verification_dir, exist_ok=True)
+        os.makedirs(verification_dir, exist_ok=True)
         
         # Open video
         self._log(f"Opening video: {self.video_path}")
@@ -352,7 +396,6 @@ class CrossDayAnalyzerWithCallbacks:
         
         # Output video (optional - skip for faster processing)
         # mp4v can truncate long videos on Windows; use AVI/MJPG for reliability
-        crossday_cfg = self.config.get("crossday") or {}
         save_output_video = crossday_cfg.get("save_output_video", self.config.get("save_output_video", True))
         use_avi = crossday_cfg.get("use_avi_output", False)
         if total_frames > 5000 and not use_avi:
@@ -455,6 +498,60 @@ class CrossDayAnalyzerWithCallbacks:
                 if len(gallery["exemplars"]) >= MAX_EXEMPLARS:
                     gallery["exemplars"].pop(0)
                 gallery["exemplars"].append(new_emb)
+
+        def get_ocr_timestamp(frame):
+            if ocr_reader is None:
+                return None
+            x, y, w_roi, h_roi = timestamp_coords
+            if y + h_roi > frame.shape[0] or x + w_roi > frame.shape[1]:
+                return None
+            roi = frame[y:y + h_roi, x:x + w_roi]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            gray_large = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            contrast_img = clahe.apply(gray_large)
+            blurred = cv2.GaussianBlur(contrast_img, (3, 3), 0)
+            kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+            final_img = cv2.filter2D(blurred, -1, kernel)
+            allowlist = '0123456789:- MonTueWedThuFriSatSun'
+            results = ocr_reader.readtext(final_img, allowlist=allowlist, detail=0)
+            text = " ".join(results)
+            match = re.search(r'(\d{2}:\d{2}:\d{2})', text)
+            if match:
+                return match.group(1)
+            return None
+
+        def map_identities_to_students():
+            if not student_db:
+                self._log("Student DB unavailable; skipping enrolled-student mapping.", "info")
+                return
+            self._log("Mapping global IDs to enrolled students (max-to-max)...")
+            mapped = 0
+            for g_id, g_data in global_gallery.items():
+                g_data["engagement_id"] = None
+                g_data["batch"] = None
+                g_data["confidence"] = 0.0
+                exemplars = g_data.get("exemplars") or []
+                if not exemplars:
+                    continue
+                best_eng_id = None
+                best_sim = -1.0
+                for eng_id, stu_data in student_db.items():
+                    stu_exemplars = (stu_data or {}).get("exemplars") or []
+                    if not stu_exemplars:
+                        continue
+                    for cctv_emb in exemplars:
+                        for stu_emb in stu_exemplars:
+                            sim = 1 - cosine(cctv_emb, stu_emb)
+                            if sim > best_sim:
+                                best_sim = sim
+                                best_eng_id = eng_id
+                if best_eng_id is not None and best_sim > T_MATCH_STUDENT:
+                    g_data["engagement_id"] = best_eng_id
+                    g_data["batch"] = (student_db.get(best_eng_id) or {}).get("batch")
+                    g_data["confidence"] = float(best_sim)
+                    mapped += 1
+            self._log(f"Student mapping complete. Identified {mapped} people.", "success")
         
         # Process frames
         frame_idx = 0
@@ -467,6 +564,7 @@ class CrossDayAnalyzerWithCallbacks:
             self._log(f"Face detection every {frame_skip} frames (faster, slight accuracy trade-off)", "info")
         if self.use_cv2_preview:
             self._log("Using cv2.imshow preview (faster than PyQt)", "info")
+        last_valid_timestamp = "00:00:00"
         executor = ThreadPoolExecutor(max_workers=2)
         try:
             while cap.isOpened():
@@ -480,7 +578,15 @@ class CrossDayAnalyzerWithCallbacks:
                 if w != target_w:
                     frame = cv2.resize(frame, (target_w, target_h))
                 
-                timestamp = datetime.fromtimestamp(frame_idx / fps).strftime('%H:%M:%S')
+                fallback_timestamp = datetime.fromtimestamp(frame_idx / max(1, fps)).strftime('%H:%M:%S')
+                if enable_ocr_timestamp and frame_idx % ocr_interval == 0:
+                    ocr_ts = get_ocr_timestamp(frame)
+                    if ocr_ts:
+                        last_valid_timestamp = ocr_ts
+                if enable_ocr_timestamp:
+                    timestamp = last_valid_timestamp if last_valid_timestamp != "00:00:00" else fallback_timestamp
+                else:
+                    timestamp = fallback_timestamp
                 
                 # Progress (0-90% for main loop; 90-100% reserved for save/report)
                 if frame_idx % 100 == 0 and total_frames > 0:
@@ -615,7 +721,7 @@ class CrossDayAnalyzerWithCallbacks:
                             t_data["global_id"] = new_gid
                             active_gids_in_frame.add(new_gid)
                             log_attendance(new_gid, timestamp)
-                        if t_data["global_id"] and RUN_MODE == "EVAL_DAY":
+                        if t_data["global_id"]:
                             old_path = f"{crops_dir}/track_{t_id}.jpg"
                             new_path = f"{verification_dir}/{t_data['global_id']}_track_{t_id}.jpg"
                             if os.path.exists(old_path) and not os.path.exists(new_path):
@@ -636,6 +742,7 @@ class CrossDayAnalyzerWithCallbacks:
                             else:
                                 label = f"Scanning: {min(t_data['frames'], 5)}/5"
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(frame, f"Live: {timestamp}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                         cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 
                 if out is not None:
@@ -675,7 +782,10 @@ class CrossDayAnalyzerWithCallbacks:
         
         if self._should_stop():
             return ""
-        
+
+        # Enrolled student mapping before summary/reporting.
+        map_identities_to_students()
+
         # Visitor upgrade
         self._log("Checking for visitor upgrades...")
         visitors_to_upgrade = []
@@ -731,7 +841,8 @@ class CrossDayAnalyzerWithCallbacks:
             "Counts": {
                 "unique_people": 0,
                 "returning": 0,
-                "visitors": 0
+                "visitors": 0,
+                "identified_students": 0
             },
             "People": []
         }
@@ -755,18 +866,26 @@ class CrossDayAnalyzerWithCallbacks:
             
             person_dict = {
                 "id": g_id,
+                "engagement_id": g_data.get("engagement_id"),
+                "batch": g_data.get("batch"),
                 "entry": entry_time,
                 "exit": exit_time,
-                "duration_sec": duration
+                "duration_sec": duration,
+                "confidence_score": g_data.get("confidence", 0.0)
             }
             
-            if is_new_walk_in:
+            if g_data.get("engagement_id") is not None:
+                person_dict["type"] = "enrolled_student"
+                person_dict["last_present_date"] = None
+                person_dict["present_last_7_days"] = 0
+                report["Counts"]["identified_students"] += 1
+            elif is_new_walk_in:
                 person_dict["type"] = "visitor"
                 person_dict["last_present_date"] = None
                 person_dict["present_last_7_days"] = 0
                 report["Counts"]["visitors"] += 1
             else:
-                person_dict["type"] = "returning"
+                person_dict["type"] = "returning_employee"
                 past_dates = [d for d in attendance.keys() if d < CURRENT_DATE]
                 past_dates.sort(reverse=True)
                 person_dict["last_present_date"] = past_dates[0] if past_dates else None
@@ -782,7 +901,11 @@ class CrossDayAnalyzerWithCallbacks:
             
             report["People"].append(person_dict)
         
-        report["Counts"]["unique_people"] = report["Counts"]["returning"] + report["Counts"]["visitors"]
+        report["Counts"]["unique_people"] = (
+            report["Counts"]["returning"] +
+            report["Counts"]["visitors"] +
+            report["Counts"].get("identified_students", 0)
+        )
         report["Session"]["duration"] = latest_exit_time
         
         report_path = os.path.join(self.output_dir, f"{CURRENT_DATE.replace('-', '_')}_attendance_report.json")

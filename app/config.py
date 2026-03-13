@@ -38,8 +38,13 @@ class ConfigManager:
             "min_samples": 8,
             "max_exemplars": 5,
             "t_outlier": 0.6,
+            "t_match_student": 0.40,
             "visitor_upgrade_days": 3,
-            "save_output_video": True
+            "save_output_video": True,
+            "student_db_path": "",
+            "enable_ocr_timestamp": True,
+            "ocr_interval": 30,
+            "timestamp_coords": [0, 15, 600, 90]
         },
         "inference": {
             "use_openvino": True,

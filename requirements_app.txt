@@ -24,6 +24,7 @@ insightface
 onnxruntime>=1.16.0
 onnx>=1.14.0  # Required by insightface (numpy_helper)
 lapx
+easyocr
 
 # API clients (for VLM metadata)
 groq>=0.4.0

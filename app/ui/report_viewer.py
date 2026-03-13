@@ -248,10 +248,12 @@ class ReportViewer(QWidget):
             
             person_type = person.get("type", "")
             type_item = QTableWidgetItem(person_type.capitalize())
-            if person_type == "returning":
+            if person_type in {"returning", "returning_employee"}:
                 type_item.setForeground(Qt.GlobalColor.darkGreen)
             elif person_type == "visitor":
                 type_item.setForeground(Qt.GlobalColor.darkBlue)
+            elif person_type == "enrolled_student":
+                type_item.setForeground(Qt.GlobalColor.darkMagenta)
             self.data_table.setItem(row, 1, type_item)
             
             self.data_table.setItem(row, 2, QTableWidgetItem(person.get("entry", "")))
