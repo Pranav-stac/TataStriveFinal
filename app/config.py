@@ -17,6 +17,8 @@ class ConfigManager:
         "last_video_path": "",
         "last_video_folder": "",
         "last_output_dir": "",
+        "last_classroom_output_dir": "",
+        "last_crossday_output_dir": "",
         "last_db_path": "",
         "bigquery": {
             "auto_sync": True,         # Trigger daily sync automatically
@@ -41,15 +43,17 @@ class ConfigManager:
             "t_match_student": 0.40,
             "visitor_upgrade_days": 3,
             "save_output_video": True,
+            "enable_motion_detection": False,
             "student_db_path": "",
             "enable_ocr_timestamp": True,
             "ocr_interval": 30,
             "timestamp_coords": [0, 15, 600, 90]
         },
         "inference": {
-            "use_openvino": True,
-            "yolo_imgsz": 416,
-            "face_det_size": 416,
+            "use_openvino": False,  # PyTorch by default = same as unique_and_recognition.py
+            "force_cpu": False,
+            "yolo_imgsz": 640,
+            "face_det_size": 640,
             "frame_skip": 1,
             "preview_mode": "cv2"
         },
@@ -86,6 +90,16 @@ class ConfigManager:
                     loaded = json.load(f)
                 # Merge with defaults to handle new keys
                 self._config = self._deep_merge(self.DEFAULT_CONFIG.copy(), loaded)
+                # Migrate to match unique_and_recognition.py defaults
+                inf = self._config.get("inference") or {}
+                if inf.get("yolo_imgsz") == 416 or inf.get("face_det_size") == 416:
+                    if "inference" not in self._config:
+                        self._config["inference"] = {}
+                    if self._config["inference"].get("yolo_imgsz") == 416:
+                        self._config["inference"]["yolo_imgsz"] = 640
+                    if self._config["inference"].get("face_det_size") == 416:
+                        self._config["inference"]["face_det_size"] = 640
+                    self._save()
             else:
                 self._config = self.DEFAULT_CONFIG.copy()
                 self._save()

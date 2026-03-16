@@ -16,6 +16,13 @@ from scipy.spatial.distance import cosine
 import insightface
 from insightface.app import FaceAnalysis
 
+# ================= STANDALONE MODELS PATH =================
+# All models loaded from 'models' folder in same directory as this script
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(SCRIPT_DIR, "models")
+INSIGHTFACE_ROOT = SCRIPT_DIR  # InsightFace expects root/models/buffalo_l/
+os.makedirs(MODELS_DIR, exist_ok=True)
+
 # ================= CONFIGURATION =================
 
 # RUN_MODE = "BUILD_DAY"  
@@ -58,26 +65,23 @@ CURRENT_DATE = "2026-02-16"
 
 # --- NEW PLAYLIST FEATURE ---
 VIDEO_PATHS = [
-    "/kaggle/input/datasets/titikshabhavsar2/engagement/16feb_1.mp4",
-    "/kaggle/input/datasets/titikshabhavsar2/engagement/16feb_2.mp4" # Add your second part here!
+    r"E:\Pranav\InternshipFreelancing\TataStrive\output_motion_only.mp4",
 ]
 
-OUTPUT_VIDEO = "/kaggle/working/feb_16_output_final.mp4"
-REPORT_JSON = "/kaggle/working/feb_16_attendance_report_final.json"
-CROPS_DIR = "/kaggle/working/crops_16feb_final"
+OUTPUT_VIDEO = os.path.join(SCRIPT_DIR, "output_motion_attendance.mp4")
+REPORT_JSON = os.path.join(SCRIPT_DIR, "attendance_report.json")
+CROPS_DIR = os.path.join(SCRIPT_DIR, "crops")
 
 # START FRESH: Point this to the working directory so it creates a brand new base file
-DB_PATH = "/kaggle/working/16feb_master_database_base.pkl" 
-# STUDENT_DB_PATH = "/kaggle/input/datasets/titikshabhavsar2/crossdaydata/4batches_student_embeddings.pkl"
-# STUDENT_DB_PATH = "/kaggle/working/pliswork_4batch_master_db.pkl"
-STUDENT_DB_PATH = "/kaggle/input/datasets/titikshabhavsar2/crossdaydata/pliswork_4batch_master_db.pkl"
+DB_PATH = os.path.join(SCRIPT_DIR, "master_database_base.pkl")
+STUDENT_DB_PATH = os.path.join(SCRIPT_DIR, "student_embeddings.pkl")  # Update path if you have a student DB
 
 # --- OCR TIMESTAMPS ---
 TIMESTAMP_COORDS = (0, 15, 600, 90)  
 OCR_INTERVAL = 30
 
 DAY_LABEL = "Day1" 
-VERIFICATION_DIR = "/kaggle/working/16feb_Verification_Matches_final" 
+VERIFICATION_DIR = os.path.join(SCRIPT_DIR, "verification_matches") 
 VISITOR_UPGRADE_DAYS = 3  
 
 # ArcFace Specific Thresholds
@@ -134,8 +138,10 @@ class UniversalMultiRepSystem:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Initializing Universal System on {self.device} in {RUN_MODE} mode...")
         
-        self.person_model = YOLO("yolov8n.pt") 
-        self.app = FaceAnalysis(name='buffalo_l', providers=['CUDAExecutionProvider'])
+        yolo_path = os.path.join(MODELS_DIR, "yolov8n.pt")
+        self.person_model = YOLO(yolo_path) if os.path.exists(yolo_path) else YOLO("yolov8n.pt")
+        face_providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if torch.cuda.is_available() else ['CPUExecutionProvider']
+        self.app = FaceAnalysis(name='buffalo_l', root=INSIGHTFACE_ROOT, providers=face_providers)
         self.app.prepare(ctx_id=0, det_size=(640, 640))
 
         # self.global_gallery = {} 
@@ -309,10 +315,8 @@ class UniversalMultiRepSystem:
                     if gid: self.update_exemplars(gid, emb)
                     
                     if len(self.track_vault[matched_t_id]["embeddings"]) == 1:
-                        fx1, fy1, fx2, fy2 = map(int, face.bbox)
-                        face_img = frame[max(0, fy1):fy2, max(0, fx1):fx2]
-                        if face_img.size > 0:
-                            cv2.imwrite(f"{CROPS_DIR}/track_{matched_t_id}.jpg", face_img)
+                        # Crops disabled to reduce disk usage
+                        pass
 
         active_gids_in_frame = set(
             self.track_vault[pt['track_id']]["global_id"] 
@@ -558,7 +562,9 @@ def main():
     system = UniversalMultiRepSystem()
     
     print("Loading EasyOCR Model...")
-    ocr_reader = easyocr.Reader(['en'], gpu=False)
+    easyocr_model_dir = os.path.join(MODELS_DIR, "easyocr")
+    os.makedirs(easyocr_model_dir, exist_ok=True)
+    ocr_reader = easyocr.Reader(['en'], gpu=False, model_storage_directory=easyocr_model_dir)
     
     # --- THE PLAYLIST LOOP ---
     for vid_idx, current_video_path in enumerate(VIDEO_PATHS):

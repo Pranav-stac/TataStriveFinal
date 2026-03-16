@@ -73,6 +73,17 @@ python build_exe.py
 
 This creates a standalone executable in `dist/TataStriveAnalytics/`.
 
+### Option 3: Double-Click Installer for End Users (Windows)
+
+If you want non-technical users to install a compiled version without Python:
+
+1. Build executable with `python build_exe.py`
+2. Build installer EXE with `installer/build_installer.ps1`
+3. Share generated Setup EXE with client
+4. Client double-clicks installer and completes wizard
+
+Detailed steps are in `installer/README.md`.
+
 ## Usage
 
 ### Classroom Analysis Tab

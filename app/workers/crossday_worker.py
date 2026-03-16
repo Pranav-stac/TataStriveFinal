@@ -60,11 +60,8 @@ class CrossDayWorker(QThread):
                 self.error.emit(err_msg)
                 return
             
-            # Preview: PyQt callback or cv2.imshow (cv2 is faster, no cross-thread overhead)
-            inference_cfg = self.config.get("inference") or {}
-            preview_mode = inference_cfg.get("preview_mode", "pyqt")
-            use_cv2_preview = self.preview_enabled and preview_mode == "cv2"
-            frame_cb = None if use_cv2_preview else (self._emit_frame if self.preview_enabled else None)
+            # Always use PyQt signal path for in-app preview (same as classroom worker)
+            frame_cb = self._emit_frame if self.preview_enabled else None
 
             analyzer = CrossDayAnalyzerWithCallbacks(
                 video_path=self.video_path,
@@ -74,7 +71,7 @@ class CrossDayWorker(QThread):
                 progress_callback=self._emit_progress,
                 log_callback=self._emit_log,
                 frame_callback=frame_cb,
-                use_cv2_preview=use_cv2_preview,
+                use_cv2_preview=False,
                 stop_check=self._check_stop
             )
             
@@ -157,6 +154,71 @@ class CrossDayAnalyzerWithCallbacks:
         if self.stop_check:
             return self.stop_check()
         return False
+
+    def _detect_motion_segments(
+        self, cap, total_frames: int, fps: int, log_cb, progress_cb, stop_check
+    ) -> list:
+        """
+        Scan video for motion using background subtraction.
+        Returns list of (start_frame, end_frame) segments (inclusive) where motion was detected.
+        """
+        import cv2
+        MOTION_SAMPLE_EVERY = 5  # Sample every Nth frame for speed
+        MOTION_PIXEL_RATIO = 0.002  # Min fraction of pixels that must change
+        MIN_SEGMENT_FRAMES = 15  # Minimum frames to form a segment
+        GAP_MERGE_FRAMES = 90  # Merge segments within this gap (e.g. 3 sec at 30fps)
+        
+        bg_sub = cv2.createBackgroundSubtractorMOG2(history=120, varThreshold=25, detectShadows=False)
+        segments = []
+        in_segment = False
+        segment_start = 0
+        
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        frame_idx = 0
+        
+        while frame_idx < total_frames:
+            if stop_check and stop_check():
+                return segments
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            if frame_idx % MOTION_SAMPLE_EVERY != 0:
+                frame_idx += 1
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            fg = bg_sub.apply(gray)
+            motion_pixels = np.count_nonzero(fg)
+            total_pixels = fg.size
+            has_motion = (total_pixels > 0 and motion_pixels / total_pixels >= MOTION_PIXEL_RATIO)
+            
+            if has_motion:
+                if not in_segment:
+                    in_segment = True
+                    segment_start = max(0, frame_idx - MOTION_SAMPLE_EVERY)
+            else:
+                if in_segment:
+                    end = frame_idx
+                    if end - segment_start >= MIN_SEGMENT_FRAMES:
+                        segments.append((segment_start, end))
+                    in_segment = False
+            
+            if frame_idx % 500 == 0 and progress_cb:
+                pct = min(15, int(frame_idx / max(1, total_frames) * 15))
+                progress_cb(pct, f"Scanning for motion: {frame_idx}/{total_frames}")
+            frame_idx += 1
+        
+        if in_segment and (frame_idx - segment_start) >= MIN_SEGMENT_FRAMES:
+            segments.append((segment_start, min(frame_idx, total_frames - 1)))
+        
+        # Merge nearby segments
+        merged = []
+        for start, end in sorted(segments):
+            if merged and (start - merged[-1][1]) <= GAP_MERGE_FRAMES:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        
+        return merged
         
     def analyze_video(self) -> str:
         """Run the attendance analysis with callbacks."""
@@ -207,16 +269,53 @@ class CrossDayAnalyzerWithCallbacks:
         VISITOR_UPGRADE_DAYS = self.config.get("visitor_upgrade_days", 3)
         crossday_cfg = self.config.get("crossday") or {}
         T_MATCH_STUDENT = float(crossday_cfg.get("t_match_student", 0.40))
+
+        def runtime_roots():
+            roots = []
+            try:
+                roots.append(Path(__file__).resolve().parent.parent.parent)
+            except Exception:
+                pass
+            if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+                roots.append(Path(sys._MEIPASS))
+            try:
+                roots.append(Path(sys.executable).resolve().parent)
+            except Exception:
+                pass
+            # Keep order while de-duplicating.
+            unique = []
+            seen = set()
+            for root in roots:
+                key = str(root)
+                if key not in seen:
+                    unique.append(root)
+                    seen.add(key)
+            return unique
+
+        roots = runtime_roots()
+
+        def resolve_existing_file(candidates):
+            for c in candidates:
+                if c and c.exists():
+                    return str(c)
+            return ""
+
         student_db_path = str(crossday_cfg.get("student_db_path", "") or "").strip()
+        if student_db_path and not Path(student_db_path).exists():
+            self._log(f"Configured student DB path not found: {student_db_path}", "warning")
+            student_db_path = ""
         if not student_db_path:
-            project_root = Path(__file__).resolve().parent.parent.parent
-            auto_candidates = [
-                project_root / "pliswork_4batch_master_db.pkl",
-                project_root / "4batches_student_embeddings.pkl",
-                project_root / "Models" / "pliswork_4batch_master_db.pkl",
-                project_root / "Models" / "4batches_student_embeddings.pkl",
-            ]
-            student_db_path = next((str(p) for p in auto_candidates if p.exists()), "")
+            auto_candidates = []
+            for root in roots:
+                auto_candidates.extend([
+                    root / "pliswork_4batch_master_db.pkl",
+                    root / "4batches_student_embeddings.pkl",
+                    root / "Models" / "pliswork_4batch_master_db.pkl",
+                    root / "Models" / "4batches_student_embeddings.pkl",
+                    root / "app" / "Models" / "pliswork_4batch_master_db.pkl",
+                    root / "app" / "Models" / "4batches_student_embeddings.pkl",
+                ])
+            student_db_path = resolve_existing_file(auto_candidates)
         enable_ocr_timestamp = bool(crossday_cfg.get("enable_ocr_timestamp", False))
         ocr_interval = max(1, int(crossday_cfg.get("ocr_interval", 30)))
         timestamp_coords = crossday_cfg.get("timestamp_coords", [0, 15, 600, 90])
@@ -227,14 +326,19 @@ class CrossDayAnalyzerWithCallbacks:
         except (TypeError, ValueError):
             timestamp_coords = (0, 15, 600, 90)
         
-        # Device setup (GPU when available, else CPU - same logic on both)
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # Device setup (allow forcing CPU from settings)
+        force_cpu = bool((self.config.get("inference") or {}).get("force_cpu", False))
+        device = 'cpu' if force_cpu else ('cuda' if torch.cuda.is_available() else 'cpu')
+        if force_cpu:
+            self._log("CPU-only mode enabled from settings")
         self._log(f"Running on: {device}")
         self._log(f"Mode: {RUN_MODE}, Date: {CURRENT_DATE}")
         
-        # Inference optimization config (OpenVINO for Intel CPU speedup)
+        # 100% match unique_and_recognition.py: hardcode params (ignore config)
         inference_cfg = self.config.get("inference") or {}
-        use_openvino = inference_cfg.get("use_openvino", True) and device == 'cpu'
+        use_openvino = False  # Standalone uses PyTorch only
+        enable_motion_detection = False  # Standalone processes all frames
+        enable_ocr_timestamp = True  # Standalone always uses EasyOCR for timestamp
         if use_openvino:
             try:
                 v = tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2])
@@ -243,17 +347,17 @@ class CrossDayAnalyzerWithCallbacks:
                     self._log("OpenVINO requires torch>=2.1 (you have torch {}). Using PyTorch.".format(torch.__version__.split("+")[0]), "info")
             except Exception:
                 use_openvino = False
-        yolo_imgsz = inference_cfg.get("yolo_imgsz", 416)
-        face_det_size = inference_cfg.get("face_det_size", 416)
-        frame_skip = max(1, int(inference_cfg.get("frame_skip", 1)))  # Face detection every Nth frame
+        yolo_imgsz = 640  # Standalone uses 640
+        face_det_size = 640
+        frame_skip = 1  # Standalone runs face every frame
         
         # Load person detection model (YOLO)
         self._log("Loading person detection model...")
         person_model = None
         if use_openvino:
             try:
-                project_root = Path(__file__).resolve().parent.parent.parent
-                ov_cache = project_root / "Models" / f"yolov8n_ov_{yolo_imgsz}"
+                base_root = roots[0] if roots else Path.cwd()
+                ov_cache = base_root / "Models" / f"yolov8n_ov_{yolo_imgsz}"
                 ov_model_dir = ov_cache / "yolov8n_openvino_model"
                 xml_files = list(ov_cache.glob("**/*.xml"))
                 if xml_files:
@@ -261,7 +365,15 @@ class CrossDayAnalyzerWithCallbacks:
                     person_model = YOLO(ov_path)
                     self._log(f"Using OpenVINO YOLO (imgsz={yolo_imgsz})", "success")
                 else:
-                    base = YOLO("yolov8n.pt")
+                    yolo_candidates = []
+                    for root in roots:
+                        yolo_candidates.extend([
+                            root / "yolov8n.pt",
+                            root / "Models" / "yolov8n.pt",
+                            root / "app" / "Models" / "yolov8n.pt",
+                        ])
+                    yolo_weights = resolve_existing_file(yolo_candidates) or "yolov8n.pt"
+                    base = YOLO(yolo_weights)
                     self._log("Exporting YOLO to OpenVINO (one-time, ~1 min)...", "info")
                     ov_cache.mkdir(parents=True, exist_ok=True)
                     orig_cwd = os.getcwd()
@@ -277,20 +389,46 @@ class CrossDayAnalyzerWithCallbacks:
             except Exception as e:
                 self._log(f"OpenVINO YOLO failed ({e}), using PyTorch", "warning")
         if person_model is None:
-            person_model = YOLO("yolov8n.pt")
+            yolo_candidates = []
+            for root in roots:
+                yolo_candidates.extend([
+                    root / "yolov8n.pt",
+                    root / "Models" / "yolov8n.pt",
+                    root / "app" / "Models" / "yolov8n.pt",
+                ])
+            yolo_weights = resolve_existing_file(yolo_candidates) or "yolov8n.pt"
+            person_model = YOLO(yolo_weights)
         if device == 'cuda':
             self._log("YOLO using GPU (CUDA)", "success")
         
         # FaceAnalysis: load only if onnxruntime + InsightFace available
         # Uses buffalo_l; det_size from config (416=fast, 640=quality)
+        # Match standalone script: 640 for best accuracy. root points to models folder.
+        face_root = None
+        if getattr(sys, "frozen", False):
+            try:
+                exe_dir = Path(sys.executable).resolve().parent
+                if (exe_dir / "models" / "buffalo_l").exists():
+                    face_root = str(exe_dir)
+            except Exception:
+                pass
+        if face_root is None:
+            for root in roots:
+                if (root / "models" / "buffalo_l").exists():
+                    face_root = str(root)
+                    break
+
         if face_app == "pending":
             self._log("Loading face analysis model...")
             try:
+                fa_kw = {"name": "buffalo_l"}
+                if face_root:
+                    fa_kw["root"] = face_root
                 if device == 'cuda':
                     try:
                         face_app = FaceAnalysis(
-                            name='buffalo_l',
-                            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+                            providers=['CUDAExecutionProvider', 'CPUExecutionProvider'],
+                            **fa_kw
                         )
                         face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
                     except Exception as e:
@@ -306,7 +444,7 @@ class CrossDayAnalyzerWithCallbacks:
                                 self._log("Using OpenVINO for face detection", "info")
                         except Exception:
                             pass
-                    face_app = FaceAnalysis(name='buffalo_l', providers=face_providers)
+                    face_app = FaceAnalysis(name='buffalo_l', providers=face_providers, **fa_kw)
                     face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
                 self._log("Face analysis model loaded", "success")
             except Exception as e:
@@ -391,12 +529,40 @@ class CrossDayAnalyzerWithCallbacks:
         
         self._log(f"Video: {total_frames} frames, {fps} FPS, {w}x{h}")
         
+        # Motion detection: always OFF for 100% match with unique_and_recognition.py
+        motion_segments = []
+        enable_motion_detection = False
+        if enable_motion_detection:
+            self._log("Motion detection enabled — scanning video for motion segments...")
+            motion_segments = self._detect_motion_segments(
+                cap, total_frames, fps,
+                self._log, self._progress, self._should_stop
+            )
+            if motion_segments:
+                motion_frames = sum(end - start + 1 for start, end in motion_segments)
+                self._log(
+                    f"Found {len(motion_segments)} motion segment(s), "
+                    f"~{motion_frames} frames (of {total_frames}) — attendance will run only on these.",
+                    "success"
+                )
+            else:
+                self._log("No motion segments found. Processing entire video.", "warning")
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
+        def _in_motion_segment(idx):
+            if not motion_segments:
+                return True
+            for start, end in motion_segments:
+                if start <= idx <= end:
+                    return True
+            return False
+        
         # Resize if needed
         target_w, target_h = (1280, 720) if w > 1920 else (w, h)
         
         # Output video (optional - skip for faster processing)
         # mp4v can truncate long videos on Windows; use AVI/MJPG for reliability
-        save_output_video = crossday_cfg.get("save_output_video", self.config.get("save_output_video", True))
+        save_output_video = crossday_cfg.get("save_output_video", self.config.get("save_output_video", False))
         use_avi = crossday_cfg.get("use_avi_output", False)
         if total_frames > 5000 and not use_avi:
             use_avi = True
@@ -502,6 +668,8 @@ class CrossDayAnalyzerWithCallbacks:
         def get_ocr_timestamp(frame):
             if ocr_reader is None:
                 return None
+            if frame is None or not hasattr(frame, "shape"):
+                return None
             x, y, w_roi, h_roi = timestamp_coords
             if y + h_roi > frame.shape[0] or x + w_roi > frame.shape[1]:
                 return None
@@ -574,9 +742,28 @@ class CrossDayAnalyzerWithCallbacks:
                 success, frame = cap.read()
                 if not success:
                     break
+
+                # Some deployed environments/video codecs can yield success=True but frame=None.
+                # Skip these bad decodes so face/yolo inference never receives invalid frames.
+                if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+                    if frame_idx % 100 == 0:
+                        self._log(
+                            f"Skipping invalid decoded frame at index {frame_idx}.",
+                            "warning"
+                        )
+                    frame_idx += 1
+                    continue
                 
                 if w != target_w:
                     frame = cv2.resize(frame, (target_w, target_h))
+                if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+                    frame_idx += 1
+                    continue
+
+                # Skip frames outside motion segments (when motion detection enabled)
+                if not _in_motion_segment(frame_idx):
+                    frame_idx += 1
+                    continue
                 
                 fallback_timestamp = datetime.fromtimestamp(frame_idx / max(1, fps)).strftime('%H:%M:%S')
                 if enable_ocr_timestamp and frame_idx % ocr_interval == 0:
@@ -599,6 +786,8 @@ class CrossDayAnalyzerWithCallbacks:
 
                 def run_face():
                     if face_app is None or not effective_face_mode or (frame_idx % frame_skip) != 0:
+                        return []
+                    if frame is None or not hasattr(frame, "shape") or getattr(frame, "shape", None) is None:
                         return []
                     try:
                         return face_app.get(frame)
@@ -674,10 +863,8 @@ class CrossDayAnalyzerWithCallbacks:
                             if gid:
                                 update_exemplars(gid, emb)
                             if len(track_vault[matched_t_id]["embeddings"]) == 1:
-                                fx1, fy1, fx2, fy2 = map(int, face.bbox)
-                                face_img = frame[max(0, fy1):fy2, max(0, fx1):fx2]
-                                if face_img.size > 0:
-                                    cv2.imwrite(f"{crops_dir}/track_{matched_t_id}.jpg", face_img)
+                                    # Crops disabled - skip saving
+                                    pass
                 
                 # Identity assignment
                 active_gids_in_frame = set(
@@ -726,7 +913,8 @@ class CrossDayAnalyzerWithCallbacks:
                             new_path = f"{verification_dir}/{t_data['global_id']}_track_{t_id}.jpg"
                             if os.path.exists(old_path) and not os.path.exists(new_path):
                                 shutil.copy(old_path, new_path)
-                    if save_output_video:
+                    # Draw annotations whenever the frame will be seen (preview) or saved
+                    if save_output_video or self.frame_callback is not None or self.use_cv2_preview:
                         gid = t_data["global_id"]
                         if gid:
                             if gid.startswith("G_"):
@@ -742,8 +930,11 @@ class CrossDayAnalyzerWithCallbacks:
                             else:
                                 label = f"Scanning: {min(t_data['frames'], 5)}/5"
                         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        cv2.putText(frame, f"Live: {timestamp}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                         cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+                # Draw timestamp overlay once per frame (not per-person)
+                if save_output_video or self.frame_callback is not None or self.use_cv2_preview:
+                    cv2.putText(frame, f"Live: {timestamp}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 if out is not None:
                     out.write(frame)

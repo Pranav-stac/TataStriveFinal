@@ -163,7 +163,25 @@ class SettingsDialog(QDialog):
         upgrade_layout.addWidget(self.visitor_upgrade_spin)
         upgrade_layout.addStretch()
         crossday_form.addLayout(upgrade_layout)
-        
+
+        # Save output video
+        self.save_video_checkbox = QCheckBox("Save annotated output video")
+        self.save_video_checkbox.setToolTip(
+            "Off by default — skipping video saves disk space and speeds up processing.\n"
+            "Enable only when you need a labelled video file as output."
+        )
+        crossday_form.addWidget(self.save_video_checkbox)
+
+        # Motion detection (trim video to motion segments before attendance)
+        self.enable_motion_checkbox = QCheckBox("Enable motion detection (trim to motion segments)")
+        self.enable_motion_checkbox.setToolTip(
+            "When enabled: first scan the video for segments with motion, then run attendance only on those parts.\n"
+            "Skips static/empty scenes to speed up processing and focus on relevant footage.\n\n"
+            "IMPORTANT: Disable this if your video is already motion-filtered (e.g. output_motion_only.mp4).\n"
+            "Running motion detection on pre-filtered video can skip many frames and undercount people."
+        )
+        crossday_form.addWidget(self.enable_motion_checkbox)
+
         crossday_layout.addWidget(crossday_group)
         crossday_layout.addStretch()
         
@@ -179,6 +197,10 @@ class SettingsDialog(QDialog):
         self.use_openvino_checkbox = QCheckBox("Use OpenVINO for faster CPU inference (2-3x speedup on Intel)")
         self.use_openvino_checkbox.setToolTip("Requires: pip install openvino. Falls back to PyTorch/ONNX if unavailable.")
         inference_form.addWidget(self.use_openvino_checkbox)
+        
+        self.force_cpu_checkbox = QCheckBox("Force CPU mode (disable GPU/CUDA even if available)")
+        self.force_cpu_checkbox.setToolTip("Useful for compatibility or debugging. When enabled, all analysis runs on CPU.")
+        inference_form.addWidget(self.force_cpu_checkbox)
         
         yolo_imgsz_layout = QHBoxLayout()
         yolo_imgsz_layout.addWidget(QLabel("YOLO inference size:"))
@@ -279,12 +301,15 @@ class SettingsDialog(QDialog):
         self.t_ratio_margin_spin.setValue(crossday.get("t_ratio_margin", 0.10))
         self.min_samples_spin.setValue(crossday.get("min_samples", 8))
         self.visitor_upgrade_spin.setValue(crossday.get("visitor_upgrade_days", 3))
+        self.save_video_checkbox.setChecked(crossday.get("save_output_video", False))
+        self.enable_motion_checkbox.setChecked(crossday.get("enable_motion_detection", False))
         
         # Inference
         inference = self.config.get_section("inference") or {}
-        self.use_openvino_checkbox.setChecked(inference.get("use_openvino", True))
-        self.yolo_imgsz_spin.setValue(inference.get("yolo_imgsz", 416))
-        self.face_det_size_spin.setValue(inference.get("face_det_size", 416))
+        self.use_openvino_checkbox.setChecked(inference.get("use_openvino", False))
+        self.force_cpu_checkbox.setChecked(inference.get("force_cpu", False))
+        self.yolo_imgsz_spin.setValue(inference.get("yolo_imgsz", 640))
+        self.face_det_size_spin.setValue(inference.get("face_det_size", 640))
         self.frame_skip_attendance_spin.setValue(inference.get("frame_skip", 1))
         idx = self.preview_mode_combo.findData(inference.get("preview_mode", "cv2"))
         self.preview_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -308,9 +333,12 @@ class SettingsDialog(QDialog):
         self.config.set("crossday.t_ratio_margin", self.t_ratio_margin_spin.value(), save=False)
         self.config.set("crossday.min_samples", self.min_samples_spin.value(), save=False)
         self.config.set("crossday.visitor_upgrade_days", self.visitor_upgrade_spin.value(), save=False)
+        self.config.set("crossday.save_output_video", self.save_video_checkbox.isChecked(), save=False)
+        self.config.set("crossday.enable_motion_detection", self.enable_motion_checkbox.isChecked(), save=False)
         
         # Inference
         self.config.set("inference.use_openvino", self.use_openvino_checkbox.isChecked(), save=False)
+        self.config.set("inference.force_cpu", self.force_cpu_checkbox.isChecked(), save=False)
         self.config.set("inference.yolo_imgsz", self.yolo_imgsz_spin.value(), save=False)
         self.config.set("inference.face_det_size", self.face_det_size_spin.value(), save=False)
         self.config.set("inference.frame_skip", self.frame_skip_attendance_spin.value(), save=False)

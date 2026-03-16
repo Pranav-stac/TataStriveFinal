@@ -175,7 +175,10 @@ class ReportViewer(QWidget):
             return
             
         # Detect report type and update summary
-        if "hourly_probes" in self._report_data:
+        if "sessions" in self._report_data:
+            # Management summary report
+            self._display_management_summary()
+        elif "hourly_probes" in self._report_data:
             # Classroom report
             self._display_classroom_report()
         elif "People" in self._report_data:
@@ -219,6 +222,37 @@ class ReportViewer(QWidget):
             activities = probe.get("activity_distribution", {})
             act_str = ", ".join([f"{k}: {v}%" for k, v in activities.items()])
             self.data_table.setItem(row, 5, QTableWidgetItem(act_str))
+
+    def _display_management_summary(self):
+        """Display grouped classroom management summary report."""
+        data = self._report_data
+        sessions = data.get("sessions", [])
+
+        self.summary_cards["type"].value_label.setText("Classroom Management Summary")
+        self.summary_cards["count"].value_label.setText(f"{len(sessions)} sessions")
+        self.summary_cards["date"].value_label.setText(data.get("recording_date", "Unknown")[:10])
+        self.summary_cards["duration"].value_label.setText(data.get("classroom", "Unknown"))
+
+        self.data_table.clear()
+        self.data_table.setRowCount(len(sessions))
+        self.data_table.setColumnCount(6)
+        self.data_table.setHorizontalHeaderLabels([
+            "Session Mode", "Time Window", "Avg Students", "Engagement", "Active/Passive", "Idle/Unobs"
+        ])
+
+        for row, session in enumerate(sessions):
+            behavior = session.get("behavior_profile", {})
+            active = behavior.get("active_participation", 0)
+            passive = behavior.get("passive_focus", 0)
+            idle = behavior.get("disengaged_idle", 0)
+            unobs = behavior.get("unobservable", 0)
+
+            self.data_table.setItem(row, 0, QTableWidgetItem(session.get("session_mode", "")))
+            self.data_table.setItem(row, 1, QTableWidgetItem(session.get("time_window", "")))
+            self.data_table.setItem(row, 2, QTableWidgetItem(str(session.get("avg_student_count", 0))))
+            self.data_table.setItem(row, 3, QTableWidgetItem(f"{session.get('overall_engagement_score', 0):.2f}"))
+            self.data_table.setItem(row, 4, QTableWidgetItem(f"active: {active}%, passive: {passive}%"))
+            self.data_table.setItem(row, 5, QTableWidgetItem(f"idle: {idle}%, unobs: {unobs}%"))
             
     def _display_crossday_report(self):
         """Display an attendance report."""
@@ -238,9 +272,9 @@ class ReportViewer(QWidget):
         
         self.data_table.clear()
         self.data_table.setRowCount(len(people))
-        self.data_table.setColumnCount(6)
+        self.data_table.setColumnCount(9)
         self.data_table.setHorizontalHeaderLabels([
-            "ID", "Type", "Entry", "Exit", "Duration", "Last 7 Days"
+            "ID", "Type", "Engagement ID", "Batch", "Confidence", "Entry", "Exit", "Duration", "Last 7 Days"
         ])
         
         for row, person in enumerate(people):
@@ -255,16 +289,25 @@ class ReportViewer(QWidget):
             elif person_type == "enrolled_student":
                 type_item.setForeground(Qt.GlobalColor.darkMagenta)
             self.data_table.setItem(row, 1, type_item)
+
+            self.data_table.setItem(row, 2, QTableWidgetItem(str(person.get("engagement_id", "") or "")))
+            self.data_table.setItem(row, 3, QTableWidgetItem(str(person.get("batch", "") or "")))
+            confidence = person.get("confidence_score", 0.0)
+            try:
+                conf_text = f"{float(confidence):.3f}"
+            except (TypeError, ValueError):
+                conf_text = "0.000"
+            self.data_table.setItem(row, 4, QTableWidgetItem(conf_text))
             
-            self.data_table.setItem(row, 2, QTableWidgetItem(person.get("entry", "")))
-            self.data_table.setItem(row, 3, QTableWidgetItem(person.get("exit", "")))
+            self.data_table.setItem(row, 5, QTableWidgetItem(person.get("entry", "")))
+            self.data_table.setItem(row, 6, QTableWidgetItem(person.get("exit", "")))
             
             duration_sec = person.get("duration_sec", 0)
             hours = duration_sec // 3600
             minutes = (duration_sec % 3600) // 60
-            self.data_table.setItem(row, 4, QTableWidgetItem(f"{hours}h {minutes}m"))
+            self.data_table.setItem(row, 7, QTableWidgetItem(f"{hours}h {minutes}m"))
             
-            self.data_table.setItem(row, 5, QTableWidgetItem(str(person.get("present_last_7_days", 0))))
+            self.data_table.setItem(row, 8, QTableWidgetItem(str(person.get("present_last_7_days", 0))))
             
     def _display_generic_json(self):
         """Display generic JSON data."""

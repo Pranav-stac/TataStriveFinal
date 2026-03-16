@@ -30,6 +30,7 @@ class ClassroomWorker(QThread):
         video_path: str,
         output_dir: str,
         config: Dict[str, Any],
+        inference_config: Optional[Dict[str, Any]] = None,
         preview_enabled: bool = False,
         parent=None
     ):
@@ -37,6 +38,7 @@ class ClassroomWorker(QThread):
         self.video_path = video_path
         self.output_dir = output_dir
         self.config = config
+        self.inference_config = inference_config or {}
         self.preview_enabled = preview_enabled
         self._stop_requested = False
         
@@ -44,11 +46,7 @@ class ClassroomWorker(QThread):
         """Run the classroom analysis."""
         try:
             self.log_message.emit("Initializing classroom analysis...", "info")
-            
-            # Force CPU mode if CUDA DLL fails (common on Windows)
-            import os
-            os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-            
+
             try:
                 import torch
                 # Verify torch loads - if DLL fails, we catch it here
@@ -68,6 +66,7 @@ class ClassroomWorker(QThread):
                 video_path=self.video_path,
                 output_dir=self.output_dir,
                 config=self.config,
+                inference_config=self.inference_config,
                 progress_callback=self._emit_progress,
                 log_callback=self._emit_log,
                 frame_callback=self._emit_frame if self.preview_enabled else None,
@@ -206,6 +205,7 @@ class FaceEngagementAnalyzerWithCallbacks:
         video_path: str,
         output_dir: str,
         config: Dict[str, Any],
+        inference_config: Optional[Dict[str, Any]] = None,
         progress_callback: Optional[Callable] = None,
         log_callback: Optional[Callable] = None,
         frame_callback: Optional[Callable] = None,
@@ -214,6 +214,7 @@ class FaceEngagementAnalyzerWithCallbacks:
         self.video_path = video_path
         self.output_dir = output_dir
         self.config = config
+        self.inference_config = inference_config or {}
         self.progress_callback = progress_callback
         self.log_callback = log_callback
         self.frame_callback = frame_callback
@@ -395,11 +396,29 @@ class FaceEngagementAnalyzerWithCallbacks:
             self._log("Warning: vlm_metadata.py not found", "warning")
             def extract_camera_metadata_vlm(frame): 
                 return {"classroom": "Unknown", "base_datetime": None, "base_datetime_str": "Unknown"}
+        try:
+            from classroom_analysis.group_by_session import generate_management_summary
+        except ImportError:
+            self._log("Warning: group_by_session.py not found, management summary disabled", "warning")
+            def generate_management_summary(*args, **kwargs):
+                return None
         
         self._log("Loading detection models...")
         
-        # Device setup
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # Device setup (allow forcing CPU from settings)
+        force_cpu = bool(self.inference_config.get("force_cpu", False))
+        if force_cpu:
+            self.device = 'cpu'
+            self.use_fp16 = False
+        elif torch.cuda.is_available():
+            self.device = 'cuda:0'
+            self.use_fp16 = True
+        else:
+            self.device = 'cpu'
+            self.use_fp16 = False
+        device = self.device  # local alias used throughout this method
+        if force_cpu:
+            self._log("CPU-only mode enabled from settings")
         self._log(f"Running on: {device}")
         
         # Resolve Models path (project root or frozen app)
@@ -442,7 +461,7 @@ class FaceEngagementAnalyzerWithCallbacks:
         # VLM metadata extraction
         self._log("Extracting metadata from first frame...")
         ret, first_frame = cap.read()
-        if ret:
+        if ret and first_frame is not None and isinstance(first_frame, np.ndarray) and first_frame.size > 0:
             video_metadata = extract_camera_metadata_vlm(first_frame)
             self._log(f"Classroom: {video_metadata['classroom']}", "success")
         else:
@@ -467,16 +486,33 @@ class FaceEngagementAnalyzerWithCallbacks:
         
         # Tracker init (fp16 only on CUDA - CPU lacks half-precision conv support)
         tracker = None
+        def _ensure_valid_stdio():
+            if sys.stdout is None:
+                sys.stdout = open(os.devnull, "w")
+            if sys.stderr is None:
+                sys.stderr = open(os.devnull, "w")
+
+        def _stabilize_loguru_sink():
+            try:
+                from loguru import logger
+                logger.remove()
+                logger.add(sys.stderr if sys.stderr is not None else os.devnull, level="ERROR")
+            except Exception:
+                pass
+
         try:
+            # boxmot/loguru can fail in GUI contexts when std streams are None.
+            _ensure_valid_stdio()
+            _stabilize_loguru_sink()
+
             from boxmot import BoTSORT
             bot_weights = Path(os.path.join(weights_dir, 'osnet_x1_0_msmt17.pt'))
             if not bot_weights.exists():
                 bot_weights = Path('osnet_x1_0_msmt17.pt')
-            use_fp16 = device.startswith('cuda')
             tracker = BoTSORT(
                 model_weights=bot_weights, 
-                device='cuda:0' if device == 'cuda' else device, 
-                fp16=use_fp16, 
+                device=self.device, 
+                fp16=self.use_fp16, 
                 track_buffer=300, 
                 match_thresh=0.75
             )
@@ -485,8 +521,30 @@ class FaceEngagementAnalyzerWithCallbacks:
                 self.stitch_model = tracker.model
             self._log("Tracker initialized", "success")
         except Exception as e:
-            self._log(f"Tracker init warning: {e}", "warning")
-            tracker = None
+            # Retry once after forcing non-None streams (fixes loguru sink errors).
+            try:
+                _ensure_valid_stdio()
+                _stabilize_loguru_sink()
+
+                from boxmot import BoTSORT
+                bot_weights = Path(os.path.join(weights_dir, 'osnet_x1_0_msmt17.pt'))
+                if not bot_weights.exists():
+                    bot_weights = Path('osnet_x1_0_msmt17.pt')
+                tracker = BoTSORT(
+                    model_weights=bot_weights,
+                    device=self.device,
+                    fp16=self.use_fp16,
+                    track_buffer=300,
+                    match_thresh=0.75
+                )
+                if hasattr(tracker, 'model'):
+                    self._log("Stitcher model linked", "success")
+                    self.stitch_model = tracker.model
+                self._log("Tracker initialized (retry)", "success")
+            except Exception as retry_err:
+                self._log(f"Tracker init warning: {e}", "warning")
+                self._log(f"Tracker retry failed: {retry_err}", "warning")
+                tracker = None
         
         # Initialize RuntimeAnchorManager for ID correction
         anchor_manager = RuntimeAnchorManager(similarity_thresh=0.75, distance_thresh=120)
@@ -519,6 +577,9 @@ class FaceEngagementAnalyzerWithCallbacks:
                 ret, frame = cap.read()
                 if not ret:
                     break
+                if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+                    frames_processed += 1
+                    continue
                     
                 curr_frame_global = start_f + frames_processed
                 
@@ -745,17 +806,17 @@ class FaceEngagementAnalyzerWithCallbacks:
             total_att = sum(probe_attention.values())
             att_dist = {k: round(v / total_att * 100, 1) for k, v in probe_attention.items()} if total_att else {}
             
-            # Class mode logic (matching original) + Chaos/Activity identification
-            mvmt = probe_activities.get('walking', 0) + probe_activities.get('talking', 0)
+            # Class mode logic (matching shared classroom_analysis package)
             if student_count < 5:
                 mode = "Break"
             elif max_students > 0 and student_count < (max_students * 0.66):
-                mode = "Chaos"  # Transition/Sparse - students moving, unsettled
+                mode = "Transition/Sparse"
             else:
+                mvmt = probe_activities.get('walking', 0) + probe_activities.get('talking', 0)
                 if total_act > 0 and mvmt > (total_act * 0.3):
-                    mode = "Activity"  # Interactive - group work, hands-on
+                    mode = "Interactive"
                 else:
-                    mode = "Lecture"  # Teacher-centered, low movement
+                    mode = "Lecture"
             
             # Real world time calculator (matching original)
             real_time_str = "Unknown"
@@ -785,7 +846,7 @@ class FaceEngagementAnalyzerWithCallbacks:
         
         # 2. Event duration: merge consecutive probes with same mode into events
         events = []
-        duration_by_type = {"Lecture": 0, "Activity": 0, "Chaos": 0, "Break": 0}
+        duration_by_type = {"Lecture": 0, "Interactive": 0, "Transition/Sparse": 0, "Break": 0}
         
         if final_hourly_report:
             current_event = {
@@ -854,8 +915,8 @@ class FaceEngagementAnalyzerWithCallbacks:
             },
             "event_duration_summary": {
                 "Lecture_sec": round(duration_by_type.get("Lecture", 0), 1),
-                "Activity_sec": round(duration_by_type.get("Activity", 0), 1),
-                "Chaos_sec": round(duration_by_type.get("Chaos", 0), 1),
+                "Interactive_sec": round(duration_by_type.get("Interactive", 0), 1),
+                "TransitionSparse_sec": round(duration_by_type.get("Transition/Sparse", 0), 1),
                 "Break_sec": round(duration_by_type.get("Break", 0), 1)
             },
             "events": [
@@ -873,6 +934,17 @@ class FaceEngagementAnalyzerWithCallbacks:
         }
         with open(report_path, 'w') as f:
             json.dump(report_data, f, indent=4)
+
+        # Generate grouped management report (new shared format)
+        try:
+            mgmt_path = os.path.join(self.output_dir, "management_summary_report.json")
+            generated_path = generate_management_summary(
+                report_path, mgmt_path, probe_duration_sec=PROBE_DURATION_SEC
+            )
+            if generated_path:
+                self._log(f"Management summary saved: {generated_path}", "success")
+        except Exception as mgmt_err:
+            self._log(f"Management summary generation failed: {mgmt_err}", "warning")
         
         self._log(f"Report saved: {report_path}", "success")
         self._progress(100, "Analysis complete!")

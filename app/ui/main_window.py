@@ -311,8 +311,7 @@ class MainWindow(QMainWindow):
         import webbrowser
         webbrowser.open(
             "https://console.cloud.google.com/bigquery?"
-            "project=tatastrive-269409"
-            "&p=tatastrive-269409&d=tatastrive_analytics&page=dataset"
+            "project=tatastrive-269409&d=tatastrive_analytics&page=dataset"
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -338,15 +337,20 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────
 
     def _open_video(self):
-        """Open an input folder."""
-        last_folder = self.config.get("last_video_folder", "")
+        """Open an input folder for whichever tab is currently active."""
+        current_tab = self.tab_widget.currentWidget()
+        # Use a per-tab config key so each tab remembers its own folder
+        if current_tab is self.crossday_tab:
+            cfg_key = "last_crossday_video_folder"
+        else:
+            cfg_key = "last_classroom_video_folder"
+        last_folder = self.config.get(cfg_key, "")
         start_dir = last_folder if os.path.isdir(last_folder) else ""
         folder_path = QFileDialog.getExistingDirectory(
             self, "Open Input Folder", start_dir
         )
         if folder_path:
-            self.config.set("last_video_folder", folder_path)
-            current_tab = self.tab_widget.currentWidget()
+            self.config.set(cfg_key, folder_path)
             if hasattr(current_tab, 'set_video_folder'):
                 current_tab.set_video_folder(folder_path)
             elif hasattr(current_tab, 'set_video_path'):

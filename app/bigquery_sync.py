@@ -4,6 +4,7 @@ BigQuery Sync Service for TataStrive Analytics.
 Handles:
  - Automatic BigQuery table creation (attendance + engagement)
  - Syncing completed report JSON files to BigQuery
+ - Supports both class dynamics and management summary engagement reports
  - Daily scheduled sync (runs once per day at startup / after analysis)
  - Center-ID isolation: every row carries the device's center_id
 """
@@ -126,10 +127,10 @@ SYNC_LOG_SCHEMA = [
 def _creds_path() -> str:
     """Return absolute path to the BigQuery service-account JSON."""
     candidates = [
-        # Alongside this file (app/)
-        Path(__file__).parent / "Creds" / "credentials (1).json",
+        # Alongside this file (app/) - try both Creds and creds for case-insensitive FS
         Path(__file__).parent / "Creds" / "credentials.json",
-        # Project root
+        Path(__file__).parent / "Creds" / "credentials (1).json",
+        Path(__file__).parent / "creds" / "credentials.json",
         Path(__file__).parent.parent / "credentials.json",
     ]
     for c in candidates:
@@ -187,9 +188,20 @@ class BigQuerySyncService:
                 project=self._project_id,
                 credentials=creds
             )
-        else:
-            # Use application default credentials
+        elif os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            # Use env var path
             self._client = bigquery.Client(project=self._project_id)
+        else:
+            # No explicit creds - will use ADC or fail with clear error
+            try:
+                self._client = bigquery.Client(project=self._project_id)
+            except Exception as e:
+                raise RuntimeError(
+                    "BigQuery credentials not found. Place service account JSON at:\n"
+                    f"  app/Creds/credentials.json\n"
+                    "Or set GOOGLE_APPLICATION_CREDENTIALS to the JSON file path.\n"
+                    f"Original error: {e}"
+                )
         return self._client
 
     # ------------------------------------------------------------------
@@ -232,9 +244,33 @@ class BigQuerySyncService:
                 )
             try:
                 client.create_table(table, exists_ok=True)
+                # Migrate: add any missing columns to existing tables (fixes "no such field" errors)
+                self._add_missing_columns(client, full_table, schema_dicts)
                 print(f"[BQ] Table ready: {full_table}")
             except Exception as e:
                 print(f"[BQ] Table create warning for {table_name}: {e}")
+
+    def _add_missing_columns(
+        self, client, full_table: str, schema_dicts: List[Dict]
+    ) -> None:
+        """Add missing columns to an existing table (schema migration)."""
+        _TYPE_MAP = {"INTEGER": "INT64", "FLOAT": "FLOAT64"}  # BigQuery DDL names
+        try:
+            table = client.get_table(full_table)
+            existing = {f.name.lower() for f in table.schema}  # case-insensitive
+            for f in schema_dicts:
+                name = f.get("name")
+                if name and name.lower() not in existing:
+                    bq_type = _TYPE_MAP.get(f.get("type", "STRING"), f.get("type", "STRING"))
+                    try:
+                        q = f"ALTER TABLE `{full_table}` ADD COLUMN IF NOT EXISTS `{name}` {bq_type}"
+                        client.query(q).result()
+                        print(f"[BQ] Added column {name} to {full_table}")
+                    except Exception as col_err:
+                        if "already exists" not in str(col_err).lower():
+                            print(f"[BQ] Could not add {name}: {col_err}")
+        except Exception as e:
+            print(f"[BQ] Column migration warning for {full_table}: {e}")
 
     # ------------------------------------------------------------------
     # Report detection & routing
@@ -242,7 +278,7 @@ class BigQuerySyncService:
 
     def detect_report_type(self, report_data: Dict) -> str:
         """Return 'attendance', 'engagement', or 'unknown'."""
-        if "hourly_probes" in report_data:
+        if "hourly_probes" in report_data or "sessions" in report_data:
             return "engagement"
         if "People" in report_data and "Session" in report_data:
             return "attendance"
@@ -255,6 +291,7 @@ class BigQuerySyncService:
         """
         result = {"status": "ok", "rows_inserted": 0, "error_msg": ""}
         try:
+            self.ensure_tables()  # Guarantee migration runs (adds engagement_id, etc.)
             with open(report_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
@@ -293,7 +330,8 @@ class BigQuerySyncService:
     # ------------------------------------------------------------------
 
     def _now_ts(self) -> str:
-        return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        """Return UTC timestamp in ISO 8601 format for BigQuery TIMESTAMP fields."""
+        return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
     def _parse_report_date(self, data: Dict) -> Optional[str]:
         """Try to extract a YYYY-MM-DD date from the report."""
@@ -367,12 +405,16 @@ class BigQuerySyncService:
 
     def _build_engagement_rows(self, data: Dict, report_path: str) -> List[Dict]:
         """
-        One BigQuery row per hourly probe in the engagement report.
+        One BigQuery row per probe/session in engagement reports.
+        Supports both:
+         - class_dynamics_report.json (hourly_probes)
+         - management_summary_report.json (sessions)
         """
         ts     = self._now_ts()
         rdate  = self._parse_report_date(data)
         fname  = Path(report_path).name
         probes = data.get("hourly_probes", [])
+        sessions = data.get("sessions", [])
         dur    = data.get("event_duration_summary", {})
 
         base = {
@@ -384,13 +426,49 @@ class BigQuerySyncService:
             "baseline_max_students": data.get("baseline_max_students"),
             "report_type":           data.get("report_type"),
             "lecture_sec":           dur.get("Lecture_sec"),
-            "activity_sec":          dur.get("Activity_sec"),
-            "chaos_sec":             dur.get("Chaos_sec"),
+            # Support old + new naming from classroom mode updates.
+            "activity_sec":          dur.get("Activity_sec", dur.get("Interactive_sec")),
+            "chaos_sec":             dur.get("Chaos_sec", dur.get("TransitionSparse_sec")),
             "break_sec":             dur.get("Break_sec"),
             "report_file":           fname,
         }
 
-        if not probes:
+        if probes:
+            rows = []
+            for probe in probes:
+                row = dict(base)
+                row.update({
+                    "probe_index":           probe.get("time_slice"),
+                    "video_timestamp_sec":   probe.get("video_timestamp_sec"),
+                    "real_world_time":       probe.get("real_world_time"),
+                    "student_count":         probe.get("student_count_corrected") or probe.get("student_count"),
+                    "avg_engagement":        probe.get("avg_engagement"),
+                    "class_mode":            probe.get("class_mode"),
+                    "activity_distribution": json.dumps(probe.get("activity_distribution", {})),
+                    "attention_distribution":json.dumps(probe.get("attention_distribution", {})),
+                })
+                rows.append(row)
+            return rows
+
+        if sessions:
+            rows = []
+            for idx, session in enumerate(sessions, start=1):
+                row = dict(base)
+                behavior_profile = session.get("behavior_profile", {})
+                row.update({
+                    "probe_index":            f"Session {idx}",
+                    "video_timestamp_sec":    None,
+                    "real_world_time":        session.get("time_window"),
+                    "student_count":          session.get("avg_student_count"),
+                    "avg_engagement":         session.get("overall_engagement_score"),
+                    "class_mode":             session.get("session_mode"),
+                    "activity_distribution":  json.dumps(behavior_profile),
+                    "attention_distribution": None,
+                })
+                rows.append(row)
+            return rows
+
+        if not probes and not sessions:
             row = dict(base)
             row.update({
                 "probe_index": None, "video_timestamp_sec": None,
@@ -399,22 +477,6 @@ class BigQuerySyncService:
                 "activity_distribution": None, "attention_distribution": None,
             })
             return [row]
-
-        rows = []
-        for probe in probes:
-            row = dict(base)
-            row.update({
-                "probe_index":           probe.get("time_slice"),
-                "video_timestamp_sec":   probe.get("video_timestamp_sec"),
-                "real_world_time":       probe.get("real_world_time"),
-                "student_count":         probe.get("student_count_corrected"),
-                "avg_engagement":        probe.get("avg_engagement"),
-                "class_mode":            probe.get("class_mode"),
-                "activity_distribution": json.dumps(probe.get("activity_distribution", {})),
-                "attention_distribution":json.dumps(probe.get("attention_distribution", {})),
-            })
-            rows.append(row)
-        return rows
 
     # ------------------------------------------------------------------
     # Insert
@@ -425,9 +487,20 @@ class BigQuerySyncService:
             return
         client = self._get_client()
         full_table = f"{self._project_id}.{DATASET_ID}.{table_name}"
-        errors = client.insert_rows_json(full_table, rows)
-        if errors:
-            raise RuntimeError(f"BigQuery insert errors: {errors}")
+        try:
+            errors = client.insert_rows_json(full_table, rows)
+            if errors:
+                err_msgs = [str(e) for e in errors]
+                raise RuntimeError(f"BigQuery insert errors for {table_name}: {err_msgs}")
+        except Exception as e:
+            if "Schema" in str(e) or "schema" in str(e).lower():
+                raise RuntimeError(
+                    f"BigQuery schema mismatch for {table_name}. "
+                    "Tables may have been created with an older schema. "
+                    "Try deleting and recreating the dataset in BigQuery console, or check field types. "
+                    f"Details: {e}"
+                ) from e
+            raise
 
     # ------------------------------------------------------------------
     # Sync log
@@ -479,6 +552,7 @@ class BigQuerySyncService:
             is_report = (
                 "attendance_report" in name
                 or "class_dynamics_report" in name
+                or "management_summary_report" in name
             )
             if not is_report:
                 continue

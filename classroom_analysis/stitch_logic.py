@@ -13,7 +13,7 @@ def perform_hierarchical_stitching(json_path, similarity_threshold=0.75, max_tim
     Performs post-processing stitching on the generated index file.
     Returns: A mapping dict {original_id: merged_root_id}
     """
-    print(f"\n🧵 Loading stitching data from {json_path}...")
+    print(f"\n[*] Loading stitching data from {json_path}...")
     if not json_path or not hasattr(json_path, 'read') and not isinstance(json_path, str):
         # Handle case where file might not exist yet
         return {}
@@ -22,14 +22,14 @@ def perform_hierarchical_stitching(json_path, similarity_threshold=0.75, max_tim
         with open(json_path, 'r') as f:
             data = json.load(f)
     except Exception as e:
-        print(f"⚠️ Stitching Load Error: {e}")
+        print(f"[!] Stitching Load Error: {e}")
         return {}
 
     # Filter invalid
     valid_tracks = [d for d in data if d.get('embedding') and d.get('last_centroid')]
     valid_tracks.sort(key=lambda x: x['first_seen'])
     
-    print(f"📊 Stitching Analysis: {len(valid_tracks)} fragments...")
+    print(f"[*] Stitching Analysis: {len(valid_tracks)} fragments...")
     
     parent_map = {t['face_id']: t['face_id'] for t in valid_tracks}
     
@@ -66,7 +66,7 @@ def perform_hierarchical_stitching(json_path, similarity_threshold=0.75, max_tim
                 
                 if root_b != root_a:
                     parent_map[root_b] = root_a # Point B's root to A's root
-                    print(f"🔗 MERGE: ID {id_b} -> ID {root_a} (Sim: {sim:.2f}, Dist: {dist:.0f}px, Gap: {time_gap:.0f}s)")
+                    print(f"[+] MERGE: ID {id_b} -> ID {root_a} (Sim: {sim:.2f}, Dist: {dist:.0f}px, Gap: {time_gap:.0f}s)")
 
     # Flatten the map so every ID points directly to its ultimate root
     final_map = {}
@@ -78,5 +78,5 @@ def perform_hierarchical_stitching(json_path, similarity_threshold=0.75, max_tim
         final_map[original_id] = root
         unique_roots.add(root)
 
-    print(f"✅ STITCHING COMPLETE: {len(valid_tracks)} IDs -> {len(unique_roots)} Unique Students")
+    print(f"[OK] STITCHING COMPLETE: {len(valid_tracks)} IDs -> {len(unique_roots)} Unique Students")
     return final_map

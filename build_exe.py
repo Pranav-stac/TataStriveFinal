@@ -100,6 +100,7 @@ def build():
     resources_dir = app_dir / "resources"
     dist_dir = project_root / "dist"
     build_dir = project_root / "build"
+    env_file = project_root / ".env"
     
     # Pre-build: ensure required models exist
     print("Ensuring required models...")
@@ -160,10 +161,23 @@ def build():
         # Add existing analysis code (stitch_logic, vlm_metadata)
         f"--add-data={project_root / 'classroom_analysis'};classroom_analysis",
     ]
-    
+
     # Add Models folder (bundled so frozen app finds yolov8n-face.pt etc.)
     if models_dir.exists():
         args.append(f"--add-data={models_dir};Models")
+
+    # Bundle .env so packaged app can read GROQ_API_KEY.
+    # We also copy it beside the exe post-build for load_dotenv() defaults.
+    if env_file.exists():
+        args.append(f"--add-data={env_file};.")
+        print("Bundling .env for runtime API key loading...")
+
+    # Bundle root-level YOLO / ReID weights (searched by workers at runtime)
+    for pt_name in ["yolov8n.pt", "yolov8m.pt", "yolov8n-pose.pt", "osnet_x1_0_msmt17.pt"]:
+        pt_path = project_root / pt_name
+        if pt_path.exists():
+            args.append(f"--add-data={pt_path};.")
+            print(f"Bundling model: {pt_name}")
     
     # Add onnxruntime DLLs (PyInstaller often misses these - causes "DLL load failed" when frozen)
     ort_binaries = get_onnxruntime_binaries()
@@ -181,6 +195,14 @@ def build():
     
     # Collect all onnxruntime binaries using PyInstaller's collector
     args.append("--collect-binaries=onnxruntime")
+
+    # Bundle boxmot package data (CLIP bpe vocab etc.) so BoTSORT works in frozen app.
+    # Fixes: [Errno 2] No such file or directory: '.../boxmot/.../bpe_simple_vocab_16e6.txt.gz'
+    args.append("--collect-data=boxmot")
+
+    # Bundle insightface package data for FaceAnalysis in frozen app.
+    # Helps avoid: Face detection failed: 'NoneType' object has no attribute 'shape'
+    args.append("--collect-data=insightface")
     
     args += [
         # Hidden imports (modules that PyInstaller might miss)
@@ -232,6 +254,29 @@ def build():
     if models_src.exists():
         print("Copying Models folder...")
         shutil.copytree(models_src, models_dst)
+
+    # Post-build: Bundle InsightFace buffalo_l model so face detection works in frozen app.
+    # insightface expects root/models/buffalo_l/ with .onnx files.
+    import platform
+    if platform.system() == "Windows":
+        insightface_home = Path.home() / ".insightface" / "models" / "buffalo_l"
+    else:
+        insightface_home = Path.home() / ".insightface" / "models" / "buffalo_l"
+    buffalo_dst_dir = dist_dir / "TataStriveAnalytics" / "models" / "buffalo_l"
+    if insightface_home.exists():
+        buffalo_dst_dir.parent.mkdir(parents=True, exist_ok=True)
+        if buffalo_dst_dir.exists():
+            shutil.rmtree(buffalo_dst_dir)
+        shutil.copytree(insightface_home, buffalo_dst_dir)
+        print("Bundled InsightFace buffalo_l model for face detection.")
+    else:
+        print("Note: Run the app once in dev to download buffalo_l to ~/.insightface/models/, then rebuild to bundle it.")
+
+    # Copy .env beside the executable so load_dotenv() picks it up by default.
+    if env_file.exists():
+        env_dst = dist_dir / "TataStriveAnalytics" / ".env"
+        shutil.copy2(env_file, env_dst)
+        print("Copied .env to output folder.")
     
     # Create a batch file to run the app (cd ensures DLLs load from exe's folder)
     batch_content = '''@echo off

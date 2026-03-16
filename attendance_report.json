@@ -1,0 +1,206 @@
+{
+    "Session": {
+        "date": "2026-02-16",
+        "camera": "Cam_01",
+        "source_video": "output_motion_only.mp4",
+        "duration": "17:04:53"
+    },
+    "Counts": {
+        "unique_people": 19,
+        "returning": 0,
+        "visitors": 19,
+        "identified_students": 0
+    },
+    "People": [
+        {
+            "id": "G_001",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "15:29:18",
+            "exit": "16:08:01",
+            "duration_sec": 2323,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_002",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "15:29:21",
+            "exit": "17:04:53",
+            "duration_sec": 5732,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_003",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "15:31:18",
+            "exit": "15:31:20",
+            "duration_sec": 2,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_004",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "15:34:30",
+            "exit": "16:21:48",
+            "duration_sec": 2838,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_005",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "15:36:10",
+            "exit": "16:39:54",
+            "duration_sec": 3824,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_006",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "15:40:52",
+            "exit": "17:00:44",
+            "duration_sec": 4792,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_007",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "15:55:11",
+            "exit": "16:59:16",
+            "duration_sec": 3845,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_008",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:06:47",
+            "exit": "16:06:47",
+            "duration_sec": 0,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_009",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:09:20",
+            "exit": "16:09:38",
+            "duration_sec": 18,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_010",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:09:36",
+            "exit": "16:09:38",
+            "duration_sec": 2,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_011",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:15:49",
+            "exit": "16:52:09",
+            "duration_sec": 2180,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_012",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:21:39",
+            "exit": "16:21:41",
+            "duration_sec": 2,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_013",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:23:48",
+            "exit": "16:42:31",
+            "duration_sec": 1123,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_014",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:28:41",
+            "exit": "16:29:05",
+            "duration_sec": 24,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_015",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:28:41",
+            "exit": "16:29:01",
+            "duration_sec": 20,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_016",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:28:41",
+            "exit": "16:28:58",
+            "duration_sec": 17,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_017",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:28:41",
+            "exit": "16:29:03",
+            "duration_sec": 22,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_018",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:34:55",
+            "exit": "16:35:07",
+            "duration_sec": 12,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_019",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "16:36:38",
+            "exit": "16:36:41",
+            "duration_sec": 3,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        }
+    ]
+}

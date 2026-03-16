@@ -143,7 +143,10 @@ def main():
     auto_sync = cfg.get("bigquery.auto_sync", True)
     if auto_sync:
         output_dirs = [
-            cfg.get("last_output_dir", ""),
+            d for d in [
+                cfg.get("last_classroom_output_dir", ""),
+                cfg.get("last_crossday_output_dir", ""),
+            ] if d
         ]
         bq_service.trigger_daily_sync(
             output_dirs=output_dirs,
