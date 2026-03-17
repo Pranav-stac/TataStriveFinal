@@ -65,7 +65,7 @@ CURRENT_DATE = "2026-02-16"
 
 # --- NEW PLAYLIST FEATURE ---
 VIDEO_PATHS = [
-    r"E:\Pranav\InternshipFreelancing\TataStrive\output_motion_only.mp4",
+    r"C:\Users\HP\Downloads\D14_20260311094703.mp4",
 ]
 
 OUTPUT_VIDEO = os.path.join(SCRIPT_DIR, "output_motion_attendance.mp4")

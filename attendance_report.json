@@ -2,13 +2,13 @@
     "Session": {
         "date": "2026-02-16",
         "camera": "Cam_01",
-        "source_video": "output_motion_only.mp4",
+        "source_video": "D14_20260311094703.mp4",
         "duration": "17:04:53"
     },
     "Counts": {
-        "unique_people": 19,
+        "unique_people": 29,
         "returning": 0,
-        "visitors": 19,
+        "visitors": 29,
         "identified_students": 0
     },
     "People": [
@@ -47,8 +47,8 @@
             "engagement_id": null,
             "batch": null,
             "entry": "15:34:30",
-            "exit": "16:21:48",
-            "duration_sec": 2838,
+            "exit": "09:50:26",
+            "duration_sec": -20644,
             "confidence_score": 0.0,
             "type": "visitor"
         },
@@ -77,8 +77,8 @@
             "engagement_id": null,
             "batch": null,
             "entry": "15:55:11",
-            "exit": "16:59:16",
-            "duration_sec": 3845,
+            "exit": "09:47:20",
+            "duration_sec": -22071,
             "confidence_score": 0.0,
             "type": "visitor"
         },
@@ -199,6 +199,106 @@
             "entry": "16:36:38",
             "exit": "16:36:41",
             "duration_sec": 3,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_020",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:48:40",
+            "exit": "09:48:41",
+            "duration_sec": 1,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_021",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:48:41",
+            "exit": "09:48:42",
+            "duration_sec": 1,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_022",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:49:06",
+            "exit": "09:49:11",
+            "duration_sec": 5,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_023",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:49:10",
+            "exit": "09:49:12",
+            "duration_sec": 2,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_024",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:49:44",
+            "exit": "09:49:48",
+            "duration_sec": 4,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_025",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:49:50",
+            "exit": "09:49:54",
+            "duration_sec": 4,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_026",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:50:22",
+            "exit": "09:50:24",
+            "duration_sec": 2,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_027",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:50:25",
+            "exit": "09:50:29",
+            "duration_sec": 4,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_028",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:51:12",
+            "exit": "09:51:16",
+            "duration_sec": 4,
+            "confidence_score": 0.0,
+            "type": "visitor"
+        },
+        {
+            "id": "G_029",
+            "engagement_id": null,
+            "batch": null,
+            "entry": "09:51:44",
+            "exit": "09:51:48",
+            "duration_sec": 4,
             "confidence_score": 0.0,
             "type": "visitor"
         }

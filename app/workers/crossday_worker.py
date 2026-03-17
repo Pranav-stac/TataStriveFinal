@@ -897,7 +897,12 @@ class CrossDayAnalyzerWithCallbacks:
                             t_data["global_id"] = best_id
                             active_gids_in_frame.add(best_id)
                             log_attendance(best_id, timestamp)
-                        elif best_sim < T_NEW_ID:
+                        elif best_sim < T_NEW_ID or RUN_MODE == "EVAL_DAY":
+                            # In EVAL_DAY mode, always create a new visitor when no confident
+                            # match is found. T_NEW_ID only guards against duplicates in
+                            # BUILD_DB; in EVAL_DAY with a pre-existing gallery, similarities
+                            # often land in the 0.35–0.55 gray zone and would leave every
+                            # track permanently unidentified (resulting in 0 detections).
                             if RUN_MODE == "BUILD_DB":
                                 new_gid = f"G_{next_global_id:03d}"
                                 next_global_id += 1
