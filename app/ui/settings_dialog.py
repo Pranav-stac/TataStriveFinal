@@ -100,6 +100,14 @@ class SettingsDialog(QDialog):
         pixel_dist_layout.addStretch()
         classroom_form.addLayout(pixel_dist_layout)
         
+        # Delete video after processing complete
+        self.delete_video_classroom_checkbox = QCheckBox("Delete source video after processing completes")
+        self.delete_video_classroom_checkbox.setToolTip(
+            "When enabled, the source video file will be deleted automatically after classroom analysis "
+            "(attendance + engagement) completes successfully. Use to save disk space."
+        )
+        classroom_form.addWidget(self.delete_video_classroom_checkbox)
+        
         classroom_layout.addWidget(classroom_group)
         classroom_layout.addStretch()
         
@@ -171,6 +179,14 @@ class SettingsDialog(QDialog):
             "Enable only when you need a labelled video file as output."
         )
         crossday_form.addWidget(self.save_video_checkbox)
+
+        # Delete video after processing complete
+        self.delete_video_crossday_checkbox = QCheckBox("Delete source video after processing completes")
+        self.delete_video_crossday_checkbox.setToolTip(
+            "When enabled, the source video file will be deleted automatically after attendance analysis "
+            "completes successfully. Use to save disk space."
+        )
+        crossday_form.addWidget(self.delete_video_crossday_checkbox)
 
         # Motion detection (trim video to motion segments before attendance)
         self.enable_motion_checkbox = QCheckBox("Enable motion detection (trim to motion segments)")
@@ -293,6 +309,7 @@ class SettingsDialog(QDialog):
         self.similarity_spin.setValue(classroom.get("similarity_threshold", 0.75))
         self.max_time_gap_spin.setValue(classroom.get("max_time_gap", 600))
         self.max_pixel_dist_spin.setValue(classroom.get("max_pixel_dist", 200))
+        self.delete_video_classroom_checkbox.setChecked(classroom.get("delete_video_after_processing", False))
         
         # Cross-day
         crossday = self.config.get_section("crossday")
@@ -302,6 +319,7 @@ class SettingsDialog(QDialog):
         self.min_samples_spin.setValue(crossday.get("min_samples", 8))
         self.visitor_upgrade_spin.setValue(crossday.get("visitor_upgrade_days", 3))
         self.save_video_checkbox.setChecked(crossday.get("save_output_video", False))
+        self.delete_video_crossday_checkbox.setChecked(crossday.get("delete_video_after_processing", False))
         self.enable_motion_checkbox.setChecked(crossday.get("enable_motion_detection", False))
         
         # Inference
@@ -326,6 +344,7 @@ class SettingsDialog(QDialog):
         self.config.set("classroom.similarity_threshold", self.similarity_spin.value(), save=False)
         self.config.set("classroom.max_time_gap", self.max_time_gap_spin.value(), save=False)
         self.config.set("classroom.max_pixel_dist", self.max_pixel_dist_spin.value(), save=False)
+        self.config.set("classroom.delete_video_after_processing", self.delete_video_classroom_checkbox.isChecked(), save=False)
         
         # Cross-day
         self.config.set("crossday.t_strict_merge", self.t_strict_merge_spin.value(), save=False)
@@ -334,6 +353,7 @@ class SettingsDialog(QDialog):
         self.config.set("crossday.min_samples", self.min_samples_spin.value(), save=False)
         self.config.set("crossday.visitor_upgrade_days", self.visitor_upgrade_spin.value(), save=False)
         self.config.set("crossday.save_output_video", self.save_video_checkbox.isChecked(), save=False)
+        self.config.set("crossday.delete_video_after_processing", self.delete_video_crossday_checkbox.isChecked(), save=False)
         self.config.set("crossday.enable_motion_detection", self.enable_motion_checkbox.isChecked(), save=False)
         
         # Inference

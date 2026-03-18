@@ -31,7 +31,8 @@ class ConfigManager:
             "frame_skip": 3,
             "similarity_threshold": 0.75,
             "max_time_gap": 600,
-            "max_pixel_dist": 200
+            "max_pixel_dist": 200,
+            "delete_video_after_processing": False
         },
         "crossday": {
             "t_strict_merge": 0.50,  # Lowered from 0.55 for run-to-run matching on same video
@@ -43,6 +44,7 @@ class ConfigManager:
             "t_match_student": 0.40,
             "visitor_upgrade_days": 3,
             "save_output_video": True,
+            "delete_video_after_processing": False,
             "enable_motion_detection": False,
             "student_db_path": "",
             "enable_ocr_timestamp": True,

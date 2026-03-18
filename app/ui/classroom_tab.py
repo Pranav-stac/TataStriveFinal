@@ -219,6 +219,14 @@ class ClassroomTab(QWidget):
         if report_path:
             self.progress_panel.update_progress(100, "Complete")
             self.progress_panel.log_success(f"Analysis complete! Report saved to: {report_path}")
+            # Delete source video if setting is enabled
+            if self._current_video and self.config.get("classroom.delete_video_after_processing", False):
+                try:
+                    if os.path.isfile(self._current_video):
+                        os.remove(self._current_video)
+                        self.progress_panel.log_info(f"Deleted source video: {os.path.basename(self._current_video)}")
+                except OSError as e:
+                    self.progress_panel.log_warning(f"Could not delete video: {e}")
             self.analysis_complete.emit(report_path)
         else:
             self.progress_panel.log_warning("Analysis stopped by user.")
