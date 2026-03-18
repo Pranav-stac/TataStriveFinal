@@ -126,12 +126,17 @@ SYNC_LOG_SCHEMA = [
 
 def _creds_path() -> str:
     """Return absolute path to the BigQuery service-account JSON."""
+    app_dir = Path(__file__).resolve().parent
+    exe_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else app_dir.parent
     candidates = [
-        # Alongside this file (app/) - try both Creds and creds for case-insensitive FS
-        Path(__file__).parent / "Creds" / "credentials.json",
-        Path(__file__).parent / "Creds" / "credentials (1).json",
-        Path(__file__).parent / "creds" / "credentials.json",
-        Path(__file__).parent.parent / "credentials.json",
+        # Next to executable (for packaged installs on new PC — add credentials.json there)
+        exe_dir / "credentials.json",
+        exe_dir / "Creds" / "credentials.json",
+        # Alongside this file (app/) - dev and bundled
+        app_dir / "Creds" / "credentials.json",
+        app_dir / "Creds" / "credentials (1).json",
+        app_dir / "creds" / "credentials.json",
+        app_dir.parent / "credentials.json",
     ]
     for c in candidates:
         if c.exists():
