@@ -6,51 +6,110 @@ Displays JSON reports in a formatted table view with export capability.
 import os
 import json
 import csv
-from typing import Dict, Any, List
+import glob
+from typing import Dict, Any, List, Optional
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QPushButton, QFrame, QSplitter, QTreeWidget, QTreeWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog,
-    QMessageBox, QTabWidget, QSizePolicy
+    QMessageBox, QTabWidget, QSizePolicy, QComboBox
 )
 from PyQt6.QtCore import Qt
-
-from app.ui.widgets.file_picker import FilePicker
 
 
 class ReportViewer(QWidget):
     """Tab for viewing and exporting analysis reports."""
-    
-    def __init__(self, parent: QWidget = None):
+
+    def __init__(self, parent: QWidget = None, config: Optional[Dict] = None):
         super().__init__(parent)
+        self._config = config or {}
         self._report_data = None
         self._report_path = None
+        self._report_paths: List[str] = []
         self._setup_ui()
-        
+
+    def _scan_reports(self) -> List[str]:
+        """Scan known output directories for JSON reports."""
+        paths = []
+        seen = set()
+        dirs_to_scan = []
+
+        cfg = self._config or {}
+        last_classroom = cfg.get("last_classroom_output_dir", "")
+        last_crossday = cfg.get("last_crossday_output_dir", "")
+        last_output = cfg.get("last_output_dir", "")
+
+        for d in (last_classroom, last_crossday, last_output):
+            if d and os.path.isdir(d):
+                if d not in dirs_to_scan:
+                    dirs_to_scan.append(d)
+                parent = os.path.dirname(d)
+                if parent and os.path.isdir(parent) and parent not in dirs_to_scan:
+                    dirs_to_scan.append(parent)
+
+        patterns = [
+            "*attendance_report*.json",
+            "*class_dynamics_report*.json",
+            "*management_summary_report*.json",
+            "*_report.json",
+        ]
+
+        for base_dir in dirs_to_scan:
+            for pattern in patterns:
+                for p in glob.glob(os.path.join(base_dir, pattern)):
+                    if os.path.isfile(p) and p not in seen:
+                        seen.add(p)
+                        paths.append(p)
+            for sub in glob.glob(os.path.join(base_dir, "*", "*.json")):
+                if os.path.isfile(sub) and "report" in sub.lower() and sub not in seen:
+                    seen.add(sub)
+                    paths.append(sub)
+
+        return sorted(paths, key=lambda p: (os.path.getmtime(p), p), reverse=True)
+
+    def _refresh_dropdown(self):
+        """Refresh the report dropdown with scanned reports."""
+        self._report_paths = self._scan_reports()
+        self.report_combo.clear()
+        self.report_combo.addItem("— Select a report —", None)
+        for path in self._report_paths:
+            label = os.path.basename(path)
+            parent = os.path.basename(os.path.dirname(path))
+            if parent and parent != "Outputs":
+                label = f"{parent} / {label}"
+            self.report_combo.addItem(label, path)
+
     def _setup_ui(self):
         """Setup the tab UI."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
-        
-        # File picker
+
+        # Report selector: dropdown + refresh + browse
         picker_layout = QHBoxLayout()
-        
-        self.report_picker = FilePicker(
-            label="Report File",
-            placeholder="Select a JSON report file...",
-            file_filter="JSON Files (*.json);;All Files (*.*)"
-        )
-        self.report_picker.path_changed.connect(self._on_path_changed)
-        picker_layout.addWidget(self.report_picker, 1)
-        
-        self.load_btn = QPushButton("Load Report")
-        self.load_btn.setObjectName("primaryButton")
-        self.load_btn.clicked.connect(self._load_current_path)
-        picker_layout.addWidget(self.load_btn)
-        
+
+        combo_label = QLabel("Report:")
+        combo_label.setObjectName("filePickerLabel")
+        picker_layout.addWidget(combo_label)
+
+        self.report_combo = QComboBox()
+        self.report_combo.setMinimumWidth(280)
+        self.report_combo.setEditable(False)
+        self.report_combo.currentIndexChanged.connect(self._on_combo_changed)
+        picker_layout.addWidget(self.report_combo, 1)
+
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setToolTip("Rescan output directories for reports")
+        self.refresh_btn.clicked.connect(self._refresh_dropdown)
+        picker_layout.addWidget(self.refresh_btn)
+
+        self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.clicked.connect(self._browse_report)
+        picker_layout.addWidget(self.browse_btn)
+
         layout.addLayout(picker_layout)
+        self._refresh_dropdown()
         
         # Summary cards
         self.summary_frame = QFrame()
@@ -138,32 +197,49 @@ class ReportViewer(QWidget):
         card.value_label = value_label
         return card
         
-    def _on_path_changed(self, path: str):
-        """Handle path change."""
-        pass  # Just wait for load button
-        
-    def _load_current_path(self):
-        """Load the report from current path."""
-        path = self.report_picker.get_path()
-        if path:
+    def _on_combo_changed(self, index: int):
+        """Handle dropdown selection change."""
+        path = self.report_combo.currentData()
+        if path and os.path.isfile(path):
             self.load_report(path)
+
+    def _browse_report(self):
+        """Open file dialog to select a report."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Report",
+            "",
+            "JSON Files (*.json);;All Files (*.*)"
+        )
+        if file_path:
+            self.load_report(file_path)
+            self._refresh_dropdown()
             
     def load_report(self, path: str):
         """Load and display a report file."""
-        if not os.path.isfile(path):
-            QMessageBox.warning(self, "Error", f"File not found: {path}")
+        if not path or not os.path.isfile(path):
+            if path:
+                QMessageBox.warning(self, "Error", f"File not found: {path}")
             return
-            
+
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 self._report_data = json.load(f)
             self._report_path = path
-            self.report_picker.set_path(path)
-            
+
+            idx = self.report_combo.findData(path)
+            if idx >= 0:
+                self.report_combo.blockSignals(True)
+                self.report_combo.setCurrentIndex(idx)
+                self.report_combo.blockSignals(False)
+            else:
+                self.report_combo.insertItem(1, os.path.basename(path), path)
+                self.report_combo.setCurrentIndex(1)
+
             self._update_display()
             self.export_csv_btn.setEnabled(True)
             self.open_folder_btn.setEnabled(True)
-            
+
         except json.JSONDecodeError as e:
             QMessageBox.critical(self, "Error", f"Invalid JSON file:\n{e}")
         except Exception as e:

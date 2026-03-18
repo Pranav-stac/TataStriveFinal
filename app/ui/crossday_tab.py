@@ -71,8 +71,8 @@ class CrossDayTab(QWidget):
 
         self.db_picker = FilePicker(
             label="Database File",
-            placeholder="Select master_database.pkl  (leave empty for Day 1)...",
-            file_filter="Pickle Files (*.pkl);;All Files (*.*)"
+            placeholder="Select master_database.db or .pkl  (leave empty for Day 1)...",
+            file_filter="Database Files (*.db *.pkl);;SQLite DB (*.db);;Pickle Files (*.pkl);;All Files (*.*)"
         )
         self.db_picker.setToolTip(
             "Leave empty on Day 1 (BUILD_DB mode is auto-selected).\n"
@@ -400,9 +400,13 @@ class CrossDayTab(QWidget):
         if mode == "BUILD_DB":
             if self._runtime_db_path and os.path.isfile(self._runtime_db_path):
                 return
-            candidate = os.path.join(self._current_run_output_dir, "master_database.pkl")
+            candidate = os.path.join(self._current_run_output_dir, "master_database.db")
+            if not os.path.isfile(candidate):
+                candidate = os.path.join(self._current_run_output_dir, "master_database.pkl")
         else:
-            candidate = os.path.join(self._current_run_output_dir, "updated_master_database.pkl")
+            candidate = os.path.join(self._current_run_output_dir, "updated_master_database.db")
+            if not os.path.isfile(candidate):
+                candidate = os.path.join(self._current_run_output_dir, "updated_master_database.pkl")
         if os.path.isfile(candidate):
             self._runtime_db_path = candidate
             self.db_picker.set_path(candidate)

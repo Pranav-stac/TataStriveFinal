@@ -140,15 +140,19 @@ def build():
         site_packages = [str(Path(sys.executable).parent / "Lib" / "site-packages")]
     
     # PyInstaller arguments
+    # Use --console for first run to see boot errors; change to --windowed once stable
+    use_console = os.environ.get("BUILD_CONSOLE", "").lower() in ("1", "true", "yes")
     args = [
         str(app_dir / "main.py"),
         "--name=TataStriveAnalytics",
-        "--windowed",  # No console window
+        "--windowed" if not use_console else "--console",
         "--onedir",  # Create a directory with all files (more reliable than onefile)
+        "--noupx",   # UPX can corrupt bootloader; avoid "Failed to start embedded python interpreter"
         f"--distpath={dist_dir}",
         f"--workpath={build_dir}",
         "--clean",
         "--exclude-module=onnx.reference",  # Avoids subprocess crash (0xC0000005) during binary dep analysis
+        "--exclude-module=pytest",  # Avoids ImportErrorWhenRunningHook for pytest
         f"--paths={site_packages[0]}",  # Help PyInstaller find typing_extensions etc.
         f"--runtime-hook={project_root / 'pyi_rth_onnxruntime.py'}",  # Add DLL path before main
         
@@ -278,15 +282,19 @@ def build():
         shutil.copy2(env_file, env_dst)
         print("Copied .env to output folder.")
     
-    # Create a batch file to run the app (cd ensures DLLs load from exe's folder)
+    # Create batch files to run the app (cd ensures DLLs load from exe's folder)
+    exe_dir = dist_dir / "TataStriveAnalytics"
     batch_content = '''@echo off
 cd /d "%~dp0"
 set "PATH=%CD%\\_internal;%CD%;%PATH%"
-start "" "TataStriveAnalytics.exe"
+"TataStriveAnalytics.exe"
 '''
-    batch_path = dist_dir / "TataStriveAnalytics" / "Run_TataStrive.bat"
-    with open(batch_path, 'w') as f:
-        f.write(batch_content)
+    (exe_dir / "Run_TataStrive.bat").write_text(batch_content, encoding="utf-8")
+    # Debug launcher: run exe in-place so working dir is correct (fixes "Failed to start embedded python interpreter")
+    (exe_dir / "Run_TataStrive_Debug.bat").write_text(
+        '@echo off\ncd /d "%~dp0"\nset PATH=%CD%\\_internal;%CD%;%PATH%\necho Starting from: %CD%\n"TataStriveAnalytics.exe"\npause\n',
+        encoding="utf-8"
+    )
     
     print()
     print("=" * 50)

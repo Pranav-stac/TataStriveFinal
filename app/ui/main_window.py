@@ -61,7 +61,7 @@ class MainWindow(QMainWindow):
 
         self.classroom_tab = ClassroomTab()
         self.crossday_tab  = CrossDayTab()
-        self.report_viewer = ReportViewer()
+        self.report_viewer = ReportViewer(config=self.config)
 
         self.tab_widget.addTab(self.classroom_tab, "Classroom Analysis")
         self.tab_widget.addTab(self.crossday_tab,  "Attendance only")

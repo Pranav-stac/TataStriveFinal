@@ -227,6 +227,7 @@ class CrossDayAnalyzerWithCallbacks:
         import numpy as np
         import json
         import pickle
+        import sqlite3
         import re
         import shutil
         from datetime import datetime, timedelta
@@ -259,11 +260,12 @@ class CrossDayAnalyzerWithCallbacks:
         RUN_MODE = self.config.get("run_mode", "BUILD_DB")
         CURRENT_DATE = self.config.get("current_date", datetime.now().strftime("%Y-%m-%d"))
         DAY_LABEL = self.config.get("day_label", "Day1")
-        
-        T_STRICT_MERGE = self.config.get("t_strict_merge", 0.55)
-        T_NEW_ID = self.config.get("t_new_id", 0.35)
-        T_RATIO_MARGIN = self.config.get("t_ratio_margin", 0.10)
-        MIN_SAMPLES = self.config.get("min_samples", 8)
+
+        crossday_cfg = self.config.get("crossday") or {}
+        T_STRICT_MERGE = float(crossday_cfg.get("t_strict_merge", 0.50))
+        T_NEW_ID = float(crossday_cfg.get("t_new_id", 0.35))
+        T_RATIO_MARGIN = float(crossday_cfg.get("t_ratio_margin", 0.10))
+        MIN_SAMPLES = int(crossday_cfg.get("min_samples", 8))
         MAX_EXEMPLARS = 5
         T_OUTLIER = 0.6
         VISITOR_UPGRADE_DAYS = int(crossday_cfg.get("visitor_upgrade_days", 3))
@@ -471,29 +473,62 @@ class CrossDayAnalyzerWithCallbacks:
         operational_dates = []
         student_db = {}
         
-        # Load existing database (same as cross_day_code - no try/except)
-        if os.path.exists(self.db_path):
-            self._log(f"Loading database from {self.db_path}...")
-            with open(self.db_path, 'rb') as f:
-                db_data = pickle.load(f)
-                global_gallery = db_data.get("gallery", {})
-                operational_dates = db_data.get("operational_dates", [])
-            
-            g_ids = [k for k in global_gallery.keys() if k.startswith('G_')]
-            if g_ids:
-                next_global_id = len(g_ids) + 1
-            # Restore next_visitor_id from existing visitor IDs for this day label
-            visitor_prefix = f"{DAY_LABEL}_V_"
-            v_ids = [k for k in global_gallery.keys() if k.startswith(visitor_prefix)]
-            if v_ids:
+        # Load existing database — SQLite (.db) preferred, pickle (.pkl) as legacy fallback
+        def _load_db(db_path):
+            nonlocal global_gallery, operational_dates
+            if not db_path or not os.path.exists(db_path):
+                self._log("No existing database found, starting fresh")
+                return
+            self._log(f"Loading database from {db_path}...")
+            if db_path.endswith(".db"):
                 try:
-                    nums = [int(k.split("_")[-1]) for k in v_ids]
-                    next_visitor_id = max(nums) + 1
-                except (ValueError, IndexError):
-                    pass
+                    conn = sqlite3.connect(db_path)
+                    cur = conn.cursor()
+                    cur.execute("SELECT date FROM operational_dates")
+                    operational_dates = [r[0] for r in cur.fetchall()]
+                    cur.execute("SELECT g_id, join_date, engagement_id, batch, confidence FROM identities")
+                    for row in cur.fetchall():
+                        g_id = row[0]
+                        global_gallery[g_id] = {
+                            "join_date": row[1], "engagement_id": row[2],
+                            "batch": row[3], "confidence": row[4] or 0.0,
+                            "exemplars": [], "attendance": {}
+                        }
+                    cur.execute("SELECT g_id, embedding FROM exemplars")
+                    for row in cur.fetchall():
+                        if row[0] in global_gallery:
+                            global_gallery[row[0]]["exemplars"].append(
+                                np.frombuffer(row[1], dtype=np.float32)
+                            )
+                    cur.execute("SELECT g_id, date, entry_time, exit_time FROM attendance")
+                    for row in cur.fetchall():
+                        if row[0] in global_gallery:
+                            global_gallery[row[0]]["attendance"][row[1]] = {
+                                "entry": row[2], "exit": row[3]
+                            }
+                    conn.close()
+                except sqlite3.OperationalError:
+                    self._log("SQLite DB exists but is empty, starting fresh", "warning")
+            else:
+                with open(db_path, 'rb') as f:
+                    db_data = pickle.load(f)
+                    global_gallery = db_data.get("gallery", {})
+                    operational_dates = db_data.get("operational_dates", [])
             self._log(f"Loaded {len(global_gallery)} identities", "success")
-        else:
-            self._log("No existing database found, starting fresh")
+
+        _load_db(self.db_path)
+
+        g_ids = [k for k in global_gallery.keys() if k.startswith('G_')]
+        if g_ids:
+            next_global_id = len(g_ids) + 1
+        visitor_prefix = f"{DAY_LABEL}_V_"
+        v_ids = [k for k in global_gallery.keys() if k.startswith(visitor_prefix)]
+        if v_ids:
+            try:
+                nums = [int(k.split("_")[-1]) for k in v_ids]
+                next_visitor_id = max(nums) + 1
+            except (ValueError, IndexError):
+                pass
 
         if student_db_path:
             if os.path.exists(student_db_path):
@@ -647,7 +682,12 @@ class CrossDayAnalyzerWithCallbacks:
             if CURRENT_DATE not in g_data["attendance"]:
                 g_data["attendance"][CURRENT_DATE] = {"entry": timestamp, "exit": timestamp}
             else:
-                g_data["attendance"][CURRENT_DATE]["exit"] = timestamp
+                current_entry = g_data["attendance"][CURRENT_DATE]["entry"]
+                current_exit = g_data["attendance"][CURRENT_DATE]["exit"]
+                if timestamp < current_entry:
+                    g_data["attendance"][CURRENT_DATE]["entry"] = timestamp
+                if timestamp > current_exit:
+                    g_data["attendance"][CURRENT_DATE]["exit"] = timestamp
         
         def update_exemplars(g_id, new_emb):
             # BIOMETRIC LOCK: Never add new face data to original Day 1 Employees during evaluation days
@@ -832,7 +872,11 @@ class CrossDayAnalyzerWithCallbacks:
                         if gid:
                             log_attendance(gid, timestamp)
                 assigned_tracks = set()
-                
+
+                # Skip face processing entirely if no person was detected this frame
+                if not person_tracks:
+                    faces = []
+
                 for face in faces:
                     face_width = face.bbox[2] - face.bbox[0]
                     if face.det_score < 0.75 or face_width < 40:
@@ -848,6 +892,10 @@ class CrossDayAnalyzerWithCallbacks:
                             continue
                     matched_t_id = match_face_to_body(face.bbox, person_tracks)
                     if matched_t_id is not None and matched_t_id not in assigned_tracks:
+                        # Early stopping: once we have enough samples the track already has
+                        # an identity — skip costly embedding math for this track.
+                        if len(track_vault[matched_t_id]["embeddings"]) >= MIN_SAMPLES:
+                            continue
                         assigned_tracks.add(matched_t_id)
                         emb = face.embedding
                         should_add = True
@@ -999,19 +1047,58 @@ class CrossDayAnalyzerWithCallbacks:
         # Save database
         self._log("Saving database...")
         self._progress(92, "Saving database...")
-        
-        db_data = {
-            "gallery": global_gallery,
-            "operational_dates": operational_dates
-        }
-        
+
         if RUN_MODE == "BUILD_DB":
-            save_path = self.db_path if self.db_path else os.path.join(self.output_dir, "master_database.pkl")
+            if self.db_path:
+                save_path = self.db_path
+                # Migrate .pkl path to .db automatically
+                if save_path.endswith(".pkl"):
+                    save_path = save_path[:-4] + ".db"
+            else:
+                save_path = os.path.join(self.output_dir, "master_database.db")
         else:
-            save_path = os.path.join(self.output_dir, "updated_master_database.pkl")
-        
-        with open(save_path, 'wb') as f:
-            pickle.dump(db_data, f)
+            save_path = os.path.join(self.output_dir, "updated_master_database.db")
+
+        def _save_db(path):
+            if path.endswith(".db"):
+                conn = sqlite3.connect(path)
+                cur = conn.cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS operational_dates (date TEXT PRIMARY KEY)")
+                cur.execute("""CREATE TABLE IF NOT EXISTS identities (
+                    g_id TEXT PRIMARY KEY, join_date TEXT,
+                    engagement_id TEXT, batch TEXT, confidence REAL)""")
+                cur.execute("CREATE TABLE IF NOT EXISTS exemplars (g_id TEXT, embedding BLOB)")
+                cur.execute("""CREATE TABLE IF NOT EXISTS attendance (
+                    g_id TEXT, date TEXT, entry_time TEXT, exit_time TEXT,
+                    PRIMARY KEY (g_id, date))""")
+                # Full replace to prevent stale ghost identities after visitor upgrades
+                cur.execute("DELETE FROM exemplars")
+                cur.execute("DELETE FROM identities")
+                cur.execute("DELETE FROM attendance")
+                for date in operational_dates:
+                    cur.execute("REPLACE INTO operational_dates (date) VALUES (?)", (date,))
+                for g_id, data in global_gallery.items():
+                    cur.execute(
+                        "REPLACE INTO identities (g_id, join_date, engagement_id, batch, confidence) VALUES (?,?,?,?,?)",
+                        (g_id, data.get("join_date"), data.get("engagement_id"),
+                         data.get("batch"), data.get("confidence", 0.0))
+                    )
+                    for emb in data.get("exemplars", []):
+                        cur.execute("INSERT INTO exemplars (g_id, embedding) VALUES (?,?)",
+                                    (g_id, np.array(emb, dtype=np.float32).tobytes()))
+                    for date, times in data.get("attendance", {}).items():
+                        cur.execute(
+                            "REPLACE INTO attendance (g_id, date, entry_time, exit_time) VALUES (?,?,?,?)",
+                            (g_id, date, times["entry"], times["exit"])
+                        )
+                conn.commit()
+                conn.close()
+            else:
+                db_data = {"gallery": global_gallery, "operational_dates": operational_dates}
+                with open(path, 'wb') as f:
+                    pickle.dump(db_data, f)
+
+        _save_db(save_path)
         self._log(f"Database saved: {save_path}", "success")
         
         # Generate report

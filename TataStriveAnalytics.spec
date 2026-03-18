@@ -18,7 +18,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\pyi_rth_onnxruntime.py'],
-    excludes=['onnx.reference'],
+    excludes=['onnx.reference', 'pytest'],
     noarchive=False,
     optimize=0,
 )
@@ -33,7 +33,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -46,7 +46,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='TataStriveAnalytics',
 )
