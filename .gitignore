@@ -1,5 +1,6 @@
 /build
 /env
+/release
 /Models
 /dist
 *.pt
