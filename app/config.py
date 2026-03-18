@@ -34,7 +34,7 @@ class ConfigManager:
             "max_pixel_dist": 200
         },
         "crossday": {
-            "t_strict_merge": 0.55,
+            "t_strict_merge": 0.50,  # Lowered from 0.55 for run-to-run matching on same video
             "t_new_id": 0.35,
             "t_ratio_margin": 0.10,
             "min_samples": 8,

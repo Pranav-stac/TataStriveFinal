@@ -266,8 +266,7 @@ class CrossDayAnalyzerWithCallbacks:
         MIN_SAMPLES = self.config.get("min_samples", 8)
         MAX_EXEMPLARS = 5
         T_OUTLIER = 0.6
-        VISITOR_UPGRADE_DAYS = self.config.get("visitor_upgrade_days", 3)
-        crossday_cfg = self.config.get("crossday") or {}
+        VISITOR_UPGRADE_DAYS = int(crossday_cfg.get("visitor_upgrade_days", 3))
         T_MATCH_STUDENT = float(crossday_cfg.get("t_match_student", 0.40))
 
         def runtime_roots():
