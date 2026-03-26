@@ -445,7 +445,7 @@ class CrossDayAnalyzerWithCallbacks:
                                 self._log("Using OpenVINO for face detection", "info")
                         except Exception:
                             pass
-                    face_app = FaceAnalysis(name='buffalo_l', providers=face_providers, **fa_kw)
+                    face_app = FaceAnalysis(providers=face_providers, **fa_kw)
                     face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
                 self._log("Face analysis model loaded", "success")
             except Exception as e:
@@ -465,10 +465,17 @@ class CrossDayAnalyzerWithCallbacks:
                 self._log(f"EasyOCR unavailable ({e}). Falling back to video timeline timestamps.", "warning")
                 enable_ocr_timestamp = False
         
+        def _is_nf_id(gid) -> bool:
+            if not gid:
+                return False
+            s = str(gid)
+            return s.startswith("NF_") or "_NF_" in s
+
         # Data structures
         global_gallery = {}
         track_vault = {}
         next_global_id = 1
+        next_nf_id = 1
         next_visitor_id = 1
         operational_dates = []
         student_db = {}
@@ -518,9 +525,18 @@ class CrossDayAnalyzerWithCallbacks:
 
         _load_db(self.db_path)
 
-        g_ids = [k for k in global_gallery.keys() if k.startswith('G_')]
+        g_ids = [k for k in global_gallery.keys() if str(k).startswith("G_")]
         if g_ids:
             next_global_id = len(g_ids) + 1
+        for k in global_gallery.keys():
+            s = str(k)
+            try:
+                if s.startswith("NF_"):
+                    next_nf_id = max(next_nf_id, int(s.split("_")[-1]) + 1)
+                elif "_NF_" in s:
+                    next_nf_id = max(next_nf_id, int(s.split("_")[-1]) + 1)
+            except ValueError:
+                pass
         visitor_prefix = f"{DAY_LABEL}_V_"
         v_ids = [k for k in global_gallery.keys() if k.startswith(visitor_prefix)]
         if v_ids:
@@ -655,7 +671,10 @@ class CrossDayAnalyzerWithCallbacks:
             for g_id, data in global_gallery.items():
                 if g_id in active_gids:
                     continue
-                best_sim = max([1 - cosine(track_emb, ex) for ex in data["exemplars"]])
+                ex_list = data.get("exemplars") or []
+                if not ex_list:
+                    continue
+                best_sim = max([1 - cosine(track_emb, ex) for ex in ex_list])
                 scores.append((g_id, best_sim))
             
             if not scores:
@@ -907,7 +926,7 @@ class CrossDayAnalyzerWithCallbacks:
                         if should_add:
                             track_vault[matched_t_id]["embeddings"].append(emb)
                             gid = track_vault[matched_t_id]["global_id"]
-                            if gid:
+                            if gid and not _is_nf_id(gid):
                                 update_exemplars(gid, emb)
                             if len(track_vault[matched_t_id]["embeddings"]) == 1:
                                     # Crops disabled - skip saving
@@ -924,17 +943,86 @@ class CrossDayAnalyzerWithCallbacks:
                     t_id = pt['track_id']
                     t_data = track_vault[t_id]
                     x1, y1, x2, y2 = map(int, pt['bbox'])
+                    cur_gid = t_data["global_id"]
+                    # Promote body-only NF_* to face-based G_* when enough face embeddings exist
+                    if _is_nf_id(cur_gid) and len(t_data["embeddings"]) >= MIN_SAMPLES:
+                        track_centroid = np.mean(t_data["embeddings"], axis=0)
+                        track_centroid = track_centroid / np.linalg.norm(track_centroid)
+                        best_id, best_sim = find_match_with_margin(
+                            track_centroid, active_gids_in_frame
+                        )
+                        nf_data = global_gallery.pop(cur_gid, {})
+                        nf_att = nf_data.get("attendance", {})
+                        if best_id:
+                            ba = global_gallery[best_id].setdefault("attendance", {})
+                            for dkey, slot in nf_att.items():
+                                if dkey not in ba:
+                                    ba[dkey] = dict(slot)
+                                else:
+                                    ex = ba[dkey]
+                                    if slot["entry"] < ex["entry"]:
+                                        ex["entry"] = slot["entry"]
+                                    if slot["exit"] > ex["exit"]:
+                                        ex["exit"] = slot["exit"]
+                            t_data["global_id"] = best_id
+                            if cur_gid in active_gids_in_frame:
+                                active_gids_in_frame.discard(cur_gid)
+                            active_gids_in_frame.add(best_id)
+                            log_attendance(best_id, timestamp)
+                            update_exemplars(best_id, track_centroid)
+                        elif best_sim < T_NEW_ID or RUN_MODE == "EVAL_DAY":
+                            if RUN_MODE == "BUILD_DB":
+                                new_gid = f"G_{next_global_id:03d}"
+                                next_global_id += 1
+                            else:
+                                new_gid = f"{DAY_LABEL}_V_{next_visitor_id:03d}"
+                                next_visitor_id += 1
+                            global_gallery[new_gid] = {
+                                "exemplars": [track_centroid],
+                                "attendance": dict(nf_att),
+                                "join_date": nf_data.get("join_date", CURRENT_DATE),
+                            }
+                            t_data["global_id"] = new_gid
+                            if cur_gid in active_gids_in_frame:
+                                active_gids_in_frame.discard(cur_gid)
+                            active_gids_in_frame.add(new_gid)
+                            log_attendance(new_gid, timestamp)
+                        else:
+                            # Gray zone: restore NF slot
+                            global_gallery[cur_gid] = nf_data
+                    # Body-only: one NF_* per continuous BoT-SORT track (stable while track_id lives)
                     if (face_app is None or not effective_face_mode) and t_data["global_id"] is None and t_data["frames"] >= 5:
                         if RUN_MODE == "BUILD_DB":
-                            new_gid = f"G_{next_global_id:03d}"
-                            next_global_id += 1
+                            new_gid = f"NF_{next_nf_id:03d}"
+                            next_nf_id += 1
                         else:
-                            new_gid = f"{DAY_LABEL}_V_{next_visitor_id:03d}"
-                            next_visitor_id += 1
+                            new_gid = f"{DAY_LABEL}_NF_{next_nf_id:03d}"
+                            next_nf_id += 1
                         global_gallery[new_gid] = {
                             "exemplars": [], "attendance": {}, "join_date": CURRENT_DATE
                         }
                         t_data["global_id"] = new_gid
+                        active_gids_in_frame.add(new_gid)
+                        log_attendance(new_gid, timestamp)
+                    # Face on but no face crops on this track yet — still label body track (stable per track_id)
+                    if (
+                        face_app is not None
+                        and effective_face_mode
+                        and t_data["global_id"] is None
+                        and t_data["frames"] >= 5
+                        and len(t_data["embeddings"]) == 0
+                    ):
+                        if RUN_MODE == "BUILD_DB":
+                            new_gid = f"NF_{next_nf_id:03d}"
+                            next_nf_id += 1
+                        else:
+                            new_gid = f"{DAY_LABEL}_NF_{next_nf_id:03d}"
+                            next_nf_id += 1
+                        global_gallery[new_gid] = {
+                            "exemplars": [], "attendance": {}, "join_date": CURRENT_DATE
+                        }
+                        t_data["global_id"] = new_gid
+                        active_gids_in_frame.add(new_gid)
                         log_attendance(new_gid, timestamp)
                     if t_data["global_id"] is None and len(t_data["embeddings"]) >= MIN_SAMPLES:
                         track_centroid = np.mean(t_data["embeddings"], axis=0)
@@ -969,8 +1057,10 @@ class CrossDayAnalyzerWithCallbacks:
                     if save_output_video or self.frame_callback is not None or self.use_cv2_preview:
                         gid = t_data["global_id"]
                         if gid:
-                            if gid.startswith("G_"):
+                            if str(gid).startswith("G_"):
                                 color = (0, 255, 0)
+                            elif _is_nf_id(gid):
+                                color = (255, 255, 0)
                             else:
                                 color = (255, 0, 0)
                             label = f"ID: {gid}"
@@ -1048,20 +1138,29 @@ class CrossDayAnalyzerWithCallbacks:
         self._log("Saving database...")
         self._progress(92, "Saving database...")
 
+        # Always persist DB under this run's output_dir. Using self.db_path here broke when
+        # last_db_path pointed at a missing folder (other PC / cleared drive): video wrote to
+        # F:\...\Outputs\... but SQLite targeted the stale path → "unable to open database file".
         if RUN_MODE == "BUILD_DB":
-            if self.db_path:
-                save_path = self.db_path
-                # Migrate .pkl path to .db automatically
-                if save_path.endswith(".pkl"):
-                    save_path = save_path[:-4] + ".db"
-            else:
-                save_path = os.path.join(self.output_dir, "master_database.db")
+            save_path = os.path.join(self.output_dir, "master_database.db")
         else:
             save_path = os.path.join(self.output_dir, "updated_master_database.db")
 
         def _save_db(path):
+            path = os.path.abspath(os.path.normpath(path))
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             if path.endswith(".db"):
-                conn = sqlite3.connect(path)
+                try:
+                    conn = sqlite3.connect(path)
+                except sqlite3.OperationalError as e:
+                    self._log(
+                        f"SQLite could not open {path!r} ({e}). "
+                        "Check disk space, permissions, and that the path is not on a read-only or problematic drive.",
+                        "error",
+                    )
+                    raise
                 cur = conn.cursor()
                 cur.execute("CREATE TABLE IF NOT EXISTS operational_dates (date TEXT PRIMARY KEY)")
                 cur.execute("""CREATE TABLE IF NOT EXISTS identities (
@@ -1122,6 +1221,7 @@ class CrossDayAnalyzerWithCallbacks:
             },
             "Counts": {
                 "unique_people": 0,
+                "nf_presence": 0,
                 "returning": 0,
                 "visitors": 0,
                 "identified_students": 0
@@ -1156,7 +1256,12 @@ class CrossDayAnalyzerWithCallbacks:
                 "confidence_score": g_data.get("confidence", 0.0)
             }
             
-            if g_data.get("engagement_id") is not None:
+            if _is_nf_id(g_id):
+                person_dict["type"] = "no_face_track"
+                person_dict["last_present_date"] = None
+                person_dict["present_last_7_days"] = 0
+                report["Counts"]["nf_presence"] += 1
+            elif g_data.get("engagement_id") is not None:
                 person_dict["type"] = "enrolled_student"
                 person_dict["last_present_date"] = None
                 person_dict["present_last_7_days"] = 0

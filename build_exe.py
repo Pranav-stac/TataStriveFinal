@@ -252,11 +252,14 @@ def build():
     # Run PyInstaller
     PyInstaller.__main__.run(args)
     
-    # Post-build: Remove bundled credentials — each install must add its own (security)
-    creds_in_bundle = dist_dir / "TataStriveAnalytics" / "_internal" / "app" / "Creds"
-    if creds_in_bundle.exists():
-        shutil.rmtree(creds_in_bundle)
-        print("Removed Creds from bundle (each install adds its own credentials).")
+    # Post-build: Copy credentials next to exe so _creds_path() finds it first
+    creds_src = app_dir / "Creds" / "credentials (1).json"
+    if not creds_src.exists():
+        creds_src = app_dir / "Creds" / "credentials.json"
+    if creds_src.exists():
+        creds_dst = dist_dir / "TataStriveAnalytics" / "credentials.json"
+        shutil.copy2(creds_src, creds_dst)
+        print(f"Bundled credentials: {creds_src.name} → credentials.json (next to exe)")
 
     # Post-build: Copy Models folder if exists
     models_src = project_root / "Models"

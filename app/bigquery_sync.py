@@ -42,6 +42,7 @@ _try_import_bq()
 # ---------------------------------------------------------------------------
 # BigQuery dataset / table names
 # ---------------------------------------------------------------------------
+PROJECT_ID = "tatastrive-269409"
 DATASET_ID   = "tatastrive_analytics"
 ATTENDANCE_TABLE   = "attendance_reports"
 ENGAGEMENT_TABLE   = "engagement_reports"
@@ -66,6 +67,7 @@ ATTENDANCE_SCHEMA = [
     {"name": "returning_count",    "type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "visitor_count",      "type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "identified_students","type": "INTEGER",   "mode": "NULLABLE"},
+    {"name": "nf_presence",        "type": "INTEGER",   "mode": "NULLABLE"},
     # Per-person (repeated)
     {"name": "person_id",          "type": "STRING",    "mode": "NULLABLE"},
     {"name": "person_type",        "type": "STRING",    "mode": "NULLABLE"},
@@ -163,7 +165,7 @@ class BigQuerySyncService:
     def __init__(self, center_id: str, credentials_path: str = ""):
         self.center_id = center_id.strip()
         self._creds_path = credentials_path or _creds_path()
-        self._project_id = "tatastrive-269409"
+        self._project_id = PROJECT_ID
         self._client = None
         self._lock = threading.Lock()
         self._last_sync_date: Optional[date] = None
@@ -277,6 +279,21 @@ class BigQuerySyncService:
         except Exception as e:
             print(f"[BQ] Column migration warning for {full_table}: {e}")
 
+    def truncate_all_tables(self) -> Dict[str, str]:
+        """
+        Remove all rows from attendance_reports, engagement_reports, and sync_log.
+        Tables and schemas are kept; use before a full re-sync from local reports.
+        """
+        with self._lock:
+            client = self._get_client()
+            out: Dict[str, str] = {}
+            for table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE, SYNC_LOG_TABLE):
+                fqtn = f"`{self._project_id}.{DATASET_ID}.{table_name}`"
+                job = client.query(f"TRUNCATE TABLE {fqtn}")
+                job.result()
+                out[table_name] = "truncated"
+            return out
+
     # ------------------------------------------------------------------
     # Report detection & routing
     # ------------------------------------------------------------------
@@ -378,6 +395,7 @@ class BigQuerySyncService:
             "returning_count":  counts.get("returning", 0),
             "visitor_count":    counts.get("visitors", 0),
             "identified_students": counts.get("identified_students", 0),
+            "nf_presence":      counts.get("nf_presence", 0),
             "report_file":      fname,
         }
 

@@ -1,0 +1,36 @@
+{
+  "input_file": "bquxjob_5e83468_19d288ba089.csv",
+  "input_rows": 11074,
+  "cleaned_rows": 468,
+  "rows_removed": 10606,
+  "per_report_date": {
+    "2026-03-25": {
+      "cleaned_attendance_rows": 460,
+      "unique_person_id": 404,
+      "by_person_type": {
+        "no_face_track": 345,
+        "visitor": 115
+      },
+      "by_id_bucket": {
+        "NF_* (no face track)": 37,
+        "G_* (gallery / build-db visitor)": 22,
+        "Day*_NF_* (no face, eval-day id)": 308,
+        "Day*_V_* (visitor, eval-day id)": 93
+      },
+      "raw_rows_that_collapsed_into_these": 11047
+    },
+    "2026-03-26": {
+      "cleaned_attendance_rows": 8,
+      "unique_person_id": 8,
+      "by_person_type": {
+        "no_face_track": 7,
+        "returning_employee": 1
+      },
+      "by_id_bucket": {
+        "Day*_NF_* (no face, eval-day id)": 7,
+        "G_* (gallery / build-db visitor)": 1
+      },
+      "raw_rows_that_collapsed_into_these": 27
+    }
+  }
+}
