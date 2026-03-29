@@ -658,6 +658,15 @@ class BigQuerySyncService:
                 f"Daily sync complete — "
                 f"synced={total['synced']}, skipped={total['skipped']}, errors={total['errors']}"
             )
+            files = total.get("files") or []
+            if files:
+                names = [f.get("file", "") for f in files if f.get("file")]
+                preview = ", ".join(names[:10])
+                if len(names) > 10:
+                    preview += f" … (+{len(names) - 10} more)"
+                _log(f"Sync summary: {len(names)} report file(s) — {preview}")
+            else:
+                _log("Sync summary: no report files matched this run (check folder and date cutoff).")
             if done_callback:
                 done_callback(total)
 

@@ -285,6 +285,9 @@ class ClassroomTab(QWidget):
             self._size_probe.pop(file_path, None)
             self._pending_videos.append(file_path)
             self.progress_panel.log_info(f"Queued: {os.path.basename(file_path)}")
+            self.progress_panel.log_video_queue_summary(
+                self._pending_videos, self._current_video
+            )
         self._try_start_next_video()
 
     def _try_start_next_video(self):
@@ -309,6 +312,9 @@ class ClassroomTab(QWidget):
 
         self.progress_panel.reset()
         self.progress_panel.log_info(f"Processing: {os.path.basename(video_path)}")
+        self.progress_panel.log_video_queue_summary(
+            self._pending_videos, self._current_video
+        )
 
         classroom_config = self.config.get_section("classroom")
         inference_config = self.config.get_section("inference")

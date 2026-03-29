@@ -154,8 +154,33 @@ def main():
             done_callback=lambda summary: window.on_bq_sync_done(summary)
         )
 
+    # ── Auto-update: silent background polling (no user interaction) ──────
+    _start_update_polling(window, app)
+
     # Run application
     sys.exit(app.exec())
+
+
+def _start_update_polling(window, app) -> None:
+    """
+    Poll GitHub Releases on a timer (see updater.DEFAULT_POLL_INTERVAL_MINUTES).
+    When a newer release exists, the patch is downloaded and applied in the
+    background and the process restarts — no dialogs or clicks.
+    """
+    from app import __version__
+    from app.updater import UpdateChecker
+
+    checker = UpdateChecker(current_version=__version__, silent_auto_apply=True)
+
+    def _on_error(msg: str) -> None:
+        print(f"[Updater] Check failed: {msg}")
+
+    checker.on_error = _on_error
+
+    app.aboutToQuit.connect(checker.stop_polling)
+    checker.start_polling()
+
+    window._update_checker = checker
 
 
 if __name__ == "__main__":

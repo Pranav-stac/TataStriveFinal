@@ -309,6 +309,10 @@ class CrossDayAnalyzerWithCallbacks:
             auto_candidates = []
             for root in roots:
                 auto_candidates.extend([
+                    # ETL-generated SQLite (preferred — always up to date from BQ+S3)
+                    root / "student_enrollments.db",
+                    root / "Models" / "student_enrollments.db",
+                    # Legacy pickle formats
                     root / "pliswork_4batch_master_db.pkl",
                     root / "4batches_student_embeddings.pkl",
                     root / "Models" / "pliswork_4batch_master_db.pkl",
@@ -549,9 +553,23 @@ class CrossDayAnalyzerWithCallbacks:
         if student_db_path:
             if os.path.exists(student_db_path):
                 try:
-                    with open(student_db_path, 'rb') as f:
-                        student_db = pickle.load(f)
-                    self._log(f"Loaded Student DB: {len(student_db)} enrolled faces.", "success")
+                    if student_db_path.endswith(".db"):
+                        # ETL-generated SQLite: enrolled_students(engagement_id, batch_name, embedding BLOB)
+                        _conn = sqlite3.connect(student_db_path)
+                        _cur = _conn.cursor()
+                        _cur.execute("SELECT engagement_id, batch_name, embedding FROM enrolled_students")
+                        for _eid, _batch, _blob in _cur.fetchall():
+                            if _blob:
+                                _emb = np.frombuffer(_blob, dtype=np.float32).copy()
+                                student_db[str(_eid)] = {
+                                    "exemplars": [_emb],
+                                    "batch": _batch,
+                                }
+                        _conn.close()
+                    else:
+                        with open(student_db_path, 'rb') as f:
+                            student_db = pickle.load(f)
+                    self._log(f"Loaded Student DB: {len(student_db)} enrolled faces from {Path(student_db_path).name}.", "success")
                 except Exception as e:
                     self._log(f"Failed to load student DB ({e}). Student mapping disabled.", "warning")
             else:

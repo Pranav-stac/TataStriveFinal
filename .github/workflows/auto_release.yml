@@ -1,0 +1,109 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TataStrive Auto-Release Workflow
+#
+# Triggers automatically when you push to `main` AND the version in
+# app/__init__.py has changed compared to the previous commit.
+#
+# What it does
+# ────────────────
+#   1. Detects the new version string from app/__init__.py
+#   2. Runs scripts/publish_update.py to:
+#        • build a delta manifest.json + patch.zip
+#        • create a GitHub Release  (tag v{version})
+#        • upload both assets
+#   3. Clients auto-detect the new release on next startup and apply the patch
+#
+# Required secrets  (add in  Settings → Secrets and variables → Actions)
+# ────────────────────────────────────────────────────────────────────────
+#   RELEASE_TOKEN  — GitHub PAT with  Contents: write  scope
+#                    (the default GITHUB_TOKEN works too if you change the
+#                     value below to  ${{ secrets.GITHUB_TOKEN }})
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      # Only run when app source actually changes
+      - "app/**"
+      - "classroom_analysis/**"
+      - "scripts/**"
+      - "run_app.py"
+      - "requirements_app.txt"
+
+jobs:
+  release:
+    name: Publish delta update
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout full history (needed to compare versions) ──────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2        # need previous commit to detect version change
+
+      # ── 2. Detect whether __version__ changed ──────────────────────────────
+      - name: Check version change
+        id: version_check
+        run: |
+          CURRENT=$(python3 -c "
+          import ast, sys
+          src = open('app/__init__.py').read()
+          tree = ast.parse(src)
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Assign):
+                  for t in node.targets:
+                      if isinstance(t, ast.Name) and t.id == '__version__':
+                          print(ast.literal_eval(node.value))
+                          sys.exit(0)
+          ")
+          echo "current_version=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          # Check if version changed compared to HEAD~1
+          git show HEAD~1:app/__init__.py > /tmp/prev_init.py 2>/dev/null || true
+          PREV=$(python3 -c "
+          import ast, sys
+          try:
+              src = open('/tmp/prev_init.py').read()
+          except FileNotFoundError:
+              print('')
+              sys.exit(0)
+          tree = ast.parse(src)
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Assign):
+                  for t in node.targets:
+                      if isinstance(t, ast.Name) and t.id == '__version__':
+                          print(ast.literal_eval(node.value))
+                          sys.exit(0)
+          " 2>/dev/null || echo "")
+
+          if [ "$CURRENT" != "$PREV" ]; then
+            echo "changed=true"  >> "$GITHUB_OUTPUT"
+            echo "Version changed: $PREV → $CURRENT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Version unchanged ($CURRENT) — skipping release"
+          fi
+
+      # ── 3. Set up Python ───────────────────────────────────────────────────
+      - name: Set up Python
+        if: steps.version_check.outputs.changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 4. Publish the release ─────────────────────────────────────────────
+      - name: Publish release
+        if: steps.version_check.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_REPO:  ${{ github.repository }}
+        run: |
+          python scripts/publish_update.py \
+            --version "${{ steps.version_check.outputs.current_version }}" \
+            --token   "$GITHUB_TOKEN" \
+            --repo    "$GITHUB_REPO"

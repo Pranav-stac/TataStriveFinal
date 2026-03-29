@@ -3,6 +3,7 @@ Progress Panel Widget.
 Displays progress bar and log output.
 """
 
+import os
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QProgressBar, QTextEdit,
@@ -132,7 +133,32 @@ class ProgressPanel(QFrame):
     def log_success(self, message: str):
         """Log a success message."""
         self.log(message, "success")
-        
+
+    def log_video_queue_summary(self, pending_paths: list, current_path: str) -> None:
+        """Log how many videos are waiting and a short queue summary (folder listener tabs)."""
+        n_pending = len(pending_paths)
+        cur = os.path.basename(current_path) if current_path else ""
+        if cur:
+            if n_pending:
+                names = ", ".join(os.path.basename(p) for p in pending_paths[:5])
+                if n_pending > 5:
+                    names += f", … (+{n_pending - 5} more)"
+                msg = (
+                    f"Queue summary: {n_pending} in queue — "
+                    f"now processing: {cur}; waiting: {names}"
+                )
+            else:
+                msg = f"Queue summary: 0 in queue — now processing: {cur}"
+        else:
+            if n_pending:
+                names = ", ".join(os.path.basename(p) for p in pending_paths[:5])
+                if n_pending > 5:
+                    names += f", … (+{n_pending - 5} more)"
+                msg = f"Queue summary: {n_pending} in queue — {names}"
+            else:
+                msg = "Queue summary: empty — waiting for new videos."
+        self.log_info(msg)
+
     def clear_log(self):
         """Clear the log output."""
         self.log_text.clear()
