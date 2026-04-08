@@ -235,6 +235,8 @@ class CrossDayAnalyzerWithCallbacks:
         from scipy.spatial.distance import cosine
         from ultralytics import YOLO
         
+        self._progress(0, "Preparing attendance analysis…")
+        
         # InsightFace + onnxruntime for face-based identity; fallback to simplified (track-only) mode
         face_app = None
         try:
@@ -262,10 +264,15 @@ class CrossDayAnalyzerWithCallbacks:
         DAY_LABEL = self.config.get("day_label", "Day1")
 
         crossday_cfg = self.config.get("crossday") or {}
-        T_STRICT_MERGE = float(crossday_cfg.get("t_strict_merge", 0.50))
-        T_NEW_ID = float(crossday_cfg.get("t_new_id", 0.35))
-        T_RATIO_MARGIN = float(crossday_cfg.get("t_ratio_margin", 0.10))
-        MIN_SAMPLES = int(crossday_cfg.get("min_samples", 8))
+        T_STRICT_MERGE = float(crossday_cfg.get("t_strict_merge", 0.36))
+        T_NEW_ID = float(crossday_cfg.get("t_new_id", 0.22))
+        T_RATIO_MARGIN = float(crossday_cfg.get("t_ratio_margin", 0.05))
+        NF_MIN_FRAMES = max(5, int(crossday_cfg.get("nf_min_frames_before_label", 12)))
+        MIN_SAMPLES = max(1, int(crossday_cfg.get("min_samples", 2)))
+        # InsightFace gives strong single-frame embeddings; match can start before MIN_SAMPLES collected.
+        MIN_EMBEDS_FOR_MATCH = max(1, int(crossday_cfg.get("min_embeds_for_match", 1)))
+        MIN_EMBEDS_FOR_MATCH = min(MIN_EMBEDS_FOR_MATCH, MIN_SAMPLES)
+        MIN_POST_SAMPLES = max(1, int(crossday_cfg.get("min_post_samples", 2)))
         MAX_EXEMPLARS = 5
         T_OUTLIER = 0.6
         VISITOR_UPGRADE_DAYS = int(crossday_cfg.get("visitor_upgrade_days", 3))
@@ -338,6 +345,13 @@ class CrossDayAnalyzerWithCallbacks:
             self._log("CPU-only mode enabled from settings")
         self._log(f"Running on: {device}")
         self._log(f"Mode: {RUN_MODE}, Date: {CURRENT_DATE}")
+        self._log(
+            f"InsightFace match: strict={T_STRICT_MERGE}, new_id={T_NEW_ID}, margin={T_RATIO_MARGIN}, "
+            f"collect≤{MIN_SAMPLES} emb, match≥{MIN_EMBEDS_FOR_MATCH} emb, post_video≥{MIN_POST_SAMPLES} emb, "
+            f"nf_after≥{NF_MIN_FRAMES} fr (face on)",
+            "info",
+        )
+        self._progress(2, "Loading models…")
         
         # 100% match unique_and_recognition.py: hardcode params (ignore config)
         inference_cfg = self.config.get("inference") or {}
@@ -405,6 +419,7 @@ class CrossDayAnalyzerWithCallbacks:
             person_model = YOLO(yolo_weights)
         if device == 'cuda':
             self._log("YOLO using GPU (CUDA)", "success")
+        self._progress(6, "Person detection ready")
         
         # FaceAnalysis: load only if onnxruntime + InsightFace available
         # Uses buffalo_l; det_size from config (416=fast, 640=quality)
@@ -457,6 +472,7 @@ class CrossDayAnalyzerWithCallbacks:
                 face_app = None
         if face_app is None:
             self._log("Running in simplified mode (track-only, no face matching)", "info")
+        self._progress(10, "Face pipeline ready")
 
         # Optional OCR model for camera timestamp extraction.
         ocr_reader = None
@@ -468,6 +484,7 @@ class CrossDayAnalyzerWithCallbacks:
             except Exception as e:
                 self._log(f"EasyOCR unavailable ({e}). Falling back to video timeline timestamps.", "warning")
                 enable_ocr_timestamp = False
+        self._progress(11, "Loading database…")
         
         def _is_nf_id(gid) -> bool:
             if not gid:
@@ -480,7 +497,6 @@ class CrossDayAnalyzerWithCallbacks:
         track_vault = {}
         next_global_id = 1
         next_nf_id = 1
-        next_visitor_id = 1
         operational_dates = []
         student_db = {}
         
@@ -528,10 +544,21 @@ class CrossDayAnalyzerWithCallbacks:
             self._log(f"Loaded {len(global_gallery)} identities", "success")
 
         _load_db(self.db_path)
+        self._progress(12, "Database loaded")
 
-        g_ids = [k for k in global_gallery.keys() if str(k).startswith("G_")]
-        if g_ids:
-            next_global_id = len(g_ids) + 1
+        def _max_id_suffix(keys, prefix: str) -> int:
+            m = 0
+            for k in keys:
+                s = str(k)
+                if not s.startswith(prefix):
+                    continue
+                try:
+                    m = max(m, int(s.split("_", 1)[1]))
+                except (ValueError, IndexError):
+                    pass
+            return m
+
+        next_global_id = _max_id_suffix(global_gallery.keys(), "G_") + 1
         for k in global_gallery.keys():
             s = str(k)
             try:
@@ -540,14 +567,6 @@ class CrossDayAnalyzerWithCallbacks:
                 elif "_NF_" in s:
                     next_nf_id = max(next_nf_id, int(s.split("_")[-1]) + 1)
             except ValueError:
-                pass
-        visitor_prefix = f"{DAY_LABEL}_V_"
-        v_ids = [k for k in global_gallery.keys() if k.startswith(visitor_prefix)]
-        if v_ids:
-            try:
-                nums = [int(k.split("_")[-1]) for k in v_ids]
-                next_visitor_id = max(nums) + 1
-            except (ValueError, IndexError):
                 pass
 
         if student_db_path:
@@ -575,9 +594,11 @@ class CrossDayAnalyzerWithCallbacks:
             else:
                 self._log(f"Student DB not found at: {student_db_path}", "warning")
         
-        if RUN_MODE == "BUILD_DB" and CURRENT_DATE not in operational_dates:
-            operational_dates.append(CURRENT_DATE)
-            operational_dates.sort()
+        # When OCR supplies the session date, operational_dates are filled from OCR + attendance keys.
+        if RUN_MODE == "BUILD_DB" and not enable_ocr_timestamp:
+            if CURRENT_DATE not in operational_dates:
+                operational_dates.append(CURRENT_DATE)
+                operational_dates.sort()
         
         # Create output directories
         crops_dir = os.path.join(self.output_dir, f"crops_{CURRENT_DATE.replace('-', '')}")
@@ -586,6 +607,7 @@ class CrossDayAnalyzerWithCallbacks:
         os.makedirs(verification_dir, exist_ok=True)
         
         # Open video
+        self._progress(13, "Opening video…")
         self._log(f"Opening video: {self.video_path}")
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
@@ -596,6 +618,7 @@ class CrossDayAnalyzerWithCallbacks:
         w, h = int(cap.get(3)), int(cap.get(4))
         
         self._log(f"Video: {total_frames} frames, {fps} FPS, {w}x{h}")
+        self._progress(14, f"Processing video ({total_frames} frames)…")
         
         # Motion detection: always OFF for 100% match with unique_and_recognition.py
         motion_segments = []
@@ -702,29 +725,41 @@ class CrossDayAnalyzerWithCallbacks:
             
             if len(scores) > 1:
                 second_sim = scores[1][1]
-                if (best_sim - second_sim) < T_RATIO_MARGIN:
+                # Ambiguous only if two *different* gallery ids are both strong matches.
+                # If 2nd is below merge threshold, best is the only plausible id (e.g. same
+                # person re-entering with a new track vs a weak overlap with another G_*).
+                if (best_sim - second_sim) < T_RATIO_MARGIN and second_sim > T_STRICT_MERGE:
                     return None, best_sim
             
             if best_sim > T_STRICT_MERGE:
                 return best_id, best_sim
             return None, best_sim
         
+        # Calendar day for attendance keys: OCR overlay when available, else config current_date.
+        session_attendance_date = CURRENT_DATE
+        ocr_session_date_announced = False
+        # Gallery IDs touched in *this* video only — report must not repeat people from prior videos
+        # when the same DB is chained across a queue (BUILD_DB / EVAL).
+        ids_seen_this_video: set = set()
+
         def log_attendance(g_id, timestamp):
+            ids_seen_this_video.add(str(g_id))
+            dkey = session_attendance_date
             g_data = global_gallery[g_id]
             if "join_date" not in g_data:
-                g_data["join_date"] = CURRENT_DATE
+                g_data["join_date"] = dkey
             if "attendance" not in g_data:
                 g_data["attendance"] = {}
             
-            if CURRENT_DATE not in g_data["attendance"]:
-                g_data["attendance"][CURRENT_DATE] = {"entry": timestamp, "exit": timestamp}
+            if dkey not in g_data["attendance"]:
+                g_data["attendance"][dkey] = {"entry": timestamp, "exit": timestamp}
             else:
-                current_entry = g_data["attendance"][CURRENT_DATE]["entry"]
-                current_exit = g_data["attendance"][CURRENT_DATE]["exit"]
+                current_entry = g_data["attendance"][dkey]["entry"]
+                current_exit = g_data["attendance"][dkey]["exit"]
                 if timestamp < current_entry:
-                    g_data["attendance"][CURRENT_DATE]["entry"] = timestamp
+                    g_data["attendance"][dkey]["entry"] = timestamp
                 if timestamp > current_exit:
-                    g_data["attendance"][CURRENT_DATE]["exit"] = timestamp
+                    g_data["attendance"][dkey]["exit"] = timestamp
         
         def update_exemplars(g_id, new_emb):
             # BIOMETRIC LOCK: Never add new face data to original Day 1 Employees during evaluation days
@@ -741,14 +776,59 @@ class CrossDayAnalyzerWithCallbacks:
                     gallery["exemplars"].pop(0)
                 gallery["exemplars"].append(new_emb)
 
-        def get_ocr_timestamp(frame):
+        def parse_ocr_overlay_datetime(text: str):
+            """
+            Parse DVR on-screen text into (YYYY-MM-DD or None, HH:MM:SS or None).
+            Supports: YYYY-MM-DD, MM-DD-YYYY / DD-MM-YYYY (heuristic), DD/MM/YYYY.
+            """
+            if not text:
+                return None, None
+            text = " ".join(text.split())
+            d_iso = None
+            m = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
+            if m:
+                y, mo, d = m.groups()
+                try:
+                    d_iso = datetime(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+            if not d_iso:
+                m = re.search(r"(\d{2})-(\d{2})-(\d{4})", text)
+                if m:
+                    a, b, y = m.groups()
+                    ia, ib = int(a), int(b)
+                    try:
+                        if 1 <= ia <= 12 and 1 <= ib <= 31:
+                            d_iso = datetime(int(y), ia, ib).strftime("%Y-%m-%d")
+                        elif 1 <= ib <= 12 and 1 <= ia <= 31:
+                            d_iso = datetime(int(y), ib, ia).strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
+            if not d_iso:
+                m = re.search(r"(\d{2})/(\d{2})/(\d{4})", text)
+                if m:
+                    a, b, y = m.groups()
+                    ia, ib = int(a), int(b)
+                    try:
+                        if 1 <= ib <= 12 and 1 <= ia <= 31:
+                            d_iso = datetime(int(y), ib, ia).strftime("%Y-%m-%d")
+                        elif 1 <= ia <= 12 and 1 <= ib <= 31:
+                            d_iso = datetime(int(y), ia, ib).strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
+            tm = re.search(r"(\d{2}:\d{2}:\d{2})", text)
+            t_str = tm.group(1) if tm else None
+            return d_iso, t_str
+
+        def read_ocr_overlay_frame(frame):
+            """OCR timestamp ROI: returns (date YYYY-MM-DD or None, time HH:MM:SS or None)."""
             if ocr_reader is None:
-                return None
+                return None, None
             if frame is None or not hasattr(frame, "shape"):
-                return None
+                return None, None
             x, y, w_roi, h_roi = timestamp_coords
             if y + h_roi > frame.shape[0] or x + w_roi > frame.shape[1]:
-                return None
+                return None, None
             roi = frame[y:y + h_roi, x:x + w_roi]
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
             gray_large = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
@@ -757,13 +837,10 @@ class CrossDayAnalyzerWithCallbacks:
             blurred = cv2.GaussianBlur(contrast_img, (3, 3), 0)
             kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
             final_img = cv2.filter2D(blurred, -1, kernel)
-            allowlist = '0123456789:- MonTueWedThuFriSatSun'
+            allowlist = "0123456789:/.- MonTueWedThuFriSatSun"
             results = ocr_reader.readtext(final_img, allowlist=allowlist, detail=0)
             text = " ".join(results)
-            match = re.search(r'(\d{2}:\d{2}:\d{2})', text)
-            if match:
-                return match.group(1)
-            return None
+            return parse_ocr_overlay_datetime(text)
 
         def map_identities_to_students():
             if not student_db:
@@ -809,6 +886,7 @@ class CrossDayAnalyzerWithCallbacks:
         if self.use_cv2_preview:
             self._log("Using cv2.imshow preview (faster than PyQt)", "info")
         last_valid_timestamp = "00:00:00"
+        _last_emit_pct = -1
         executor = ThreadPoolExecutor(max_workers=2)
         try:
             while cap.isOpened():
@@ -843,18 +921,34 @@ class CrossDayAnalyzerWithCallbacks:
                 
                 fallback_timestamp = datetime.fromtimestamp(frame_idx / max(1, fps)).strftime('%H:%M:%S')
                 if enable_ocr_timestamp and frame_idx % ocr_interval == 0:
-                    ocr_ts = get_ocr_timestamp(frame)
-                    if ocr_ts:
-                        last_valid_timestamp = ocr_ts
+                    ocr_d, ocr_t = read_ocr_overlay_frame(frame)
+                    if ocr_t:
+                        last_valid_timestamp = ocr_t
+                    if ocr_d:
+                        session_attendance_date = ocr_d
+                        if RUN_MODE == "BUILD_DB" and ocr_d not in operational_dates:
+                            operational_dates.append(ocr_d)
+                            operational_dates.sort()
+                        if not ocr_session_date_announced:
+                            self._log(f"OCR session date: {ocr_d}", "success")
+                            ocr_session_date_announced = True
                 if enable_ocr_timestamp:
                     timestamp = last_valid_timestamp if last_valid_timestamp != "00:00:00" else fallback_timestamp
                 else:
                     timestamp = fallback_timestamp
                 
-                # Progress (0-90% for main loop; 90-100% reserved for save/report)
-                if frame_idx % 100 == 0 and total_frames > 0:
-                    progress = min(90, int(frame_idx / total_frames * 90))
-                    self._progress(progress, f"Processing frame {frame_idx}/{total_frames}")
+                # Progress: 15–89% during main loop (avoids int() staying at 0% on long videos)
+                if total_frames > 0:
+                    frame_pct = min(89, 15 + (frame_idx * 74 + total_frames - 1) // total_frames)
+                else:
+                    frame_pct = 15
+                if (
+                    frame_idx == 0
+                    or frame_idx % 20 == 0
+                    or frame_pct != _last_emit_pct
+                ):
+                    _last_emit_pct = frame_pct
+                    self._progress(frame_pct, f"Processing frame {frame_idx}/{total_frames}")
                 
                 # Parallel: YOLO tracking + Face detection (independent, run concurrently)
                 def run_yolo():
@@ -929,9 +1023,11 @@ class CrossDayAnalyzerWithCallbacks:
                             continue
                     matched_t_id = match_face_to_body(face.bbox, person_tracks)
                     if matched_t_id is not None and matched_t_id not in assigned_tracks:
-                        # Early stopping: once we have enough samples the track already has
-                        # an identity — skip costly embedding math for this track.
-                        if len(track_vault[matched_t_id]["embeddings"]) >= MIN_SAMPLES:
+                        tv = track_vault[matched_t_id]
+                        # Stop collecting once we have a face gallery id (G_*). NF_* still collects for promotion.
+                        if tv["global_id"] is not None and not _is_nf_id(tv["global_id"]):
+                            continue
+                        if len(tv["embeddings"]) >= MIN_SAMPLES:
                             continue
                         assigned_tracks.add(matched_t_id)
                         emb = face.embedding
@@ -963,7 +1059,7 @@ class CrossDayAnalyzerWithCallbacks:
                     x1, y1, x2, y2 = map(int, pt['bbox'])
                     cur_gid = t_data["global_id"]
                     # Promote body-only NF_* to face-based G_* when enough face embeddings exist
-                    if _is_nf_id(cur_gid) and len(t_data["embeddings"]) >= MIN_SAMPLES:
+                    if _is_nf_id(cur_gid) and len(t_data["embeddings"]) >= MIN_EMBEDS_FOR_MATCH:
                         track_centroid = np.mean(t_data["embeddings"], axis=0)
                         track_centroid = track_centroid / np.linalg.norm(track_centroid)
                         best_id, best_sim = find_match_with_margin(
@@ -989,16 +1085,12 @@ class CrossDayAnalyzerWithCallbacks:
                             log_attendance(best_id, timestamp)
                             update_exemplars(best_id, track_centroid)
                         elif best_sim < T_NEW_ID or RUN_MODE == "EVAL_DAY":
-                            if RUN_MODE == "BUILD_DB":
-                                new_gid = f"G_{next_global_id:03d}"
-                                next_global_id += 1
-                            else:
-                                new_gid = f"{DAY_LABEL}_V_{next_visitor_id:03d}"
-                                next_visitor_id += 1
+                            new_gid = f"G_{next_global_id:03d}"
+                            next_global_id += 1
                             global_gallery[new_gid] = {
                                 "exemplars": [track_centroid],
                                 "attendance": dict(nf_att),
-                                "join_date": nf_data.get("join_date", CURRENT_DATE),
+                                "join_date": nf_data.get("join_date", session_attendance_date),
                             }
                             t_data["global_id"] = new_gid
                             if cur_gid in active_gids_in_frame:
@@ -1006,18 +1098,28 @@ class CrossDayAnalyzerWithCallbacks:
                             active_gids_in_frame.add(new_gid)
                             log_attendance(new_gid, timestamp)
                         else:
-                            # Gray zone: restore NF slot
-                            global_gallery[cur_gid] = nf_data
+                            # Gray zone: never keep NF_* if we already have face embeddings — mint G_* instead
+                            if len(t_data["embeddings"]) >= MIN_EMBEDS_FOR_MATCH:
+                                new_gid = f"G_{next_global_id:03d}"
+                                next_global_id += 1
+                                global_gallery[new_gid] = {
+                                    "exemplars": [track_centroid],
+                                    "attendance": dict(nf_att),
+                                    "join_date": nf_data.get("join_date", session_attendance_date),
+                                }
+                                t_data["global_id"] = new_gid
+                                if cur_gid in active_gids_in_frame:
+                                    active_gids_in_frame.discard(cur_gid)
+                                active_gids_in_frame.add(new_gid)
+                                log_attendance(new_gid, timestamp)
+                            else:
+                                global_gallery[cur_gid] = nf_data
                     # Body-only: one NF_* per continuous BoT-SORT track (stable while track_id lives)
                     if (face_app is None or not effective_face_mode) and t_data["global_id"] is None and t_data["frames"] >= 5:
-                        if RUN_MODE == "BUILD_DB":
-                            new_gid = f"NF_{next_nf_id:03d}"
-                            next_nf_id += 1
-                        else:
-                            new_gid = f"{DAY_LABEL}_NF_{next_nf_id:03d}"
-                            next_nf_id += 1
+                        new_gid = f"NF_{next_nf_id:03d}"
+                        next_nf_id += 1
                         global_gallery[new_gid] = {
-                            "exemplars": [], "attendance": {}, "join_date": CURRENT_DATE
+                            "exemplars": [], "attendance": {}, "join_date": session_attendance_date
                         }
                         t_data["global_id"] = new_gid
                         active_gids_in_frame.add(new_gid)
@@ -1027,22 +1129,18 @@ class CrossDayAnalyzerWithCallbacks:
                         face_app is not None
                         and effective_face_mode
                         and t_data["global_id"] is None
-                        and t_data["frames"] >= 5
+                        and t_data["frames"] >= NF_MIN_FRAMES
                         and len(t_data["embeddings"]) == 0
                     ):
-                        if RUN_MODE == "BUILD_DB":
-                            new_gid = f"NF_{next_nf_id:03d}"
-                            next_nf_id += 1
-                        else:
-                            new_gid = f"{DAY_LABEL}_NF_{next_nf_id:03d}"
-                            next_nf_id += 1
+                        new_gid = f"NF_{next_nf_id:03d}"
+                        next_nf_id += 1
                         global_gallery[new_gid] = {
-                            "exemplars": [], "attendance": {}, "join_date": CURRENT_DATE
+                            "exemplars": [], "attendance": {}, "join_date": session_attendance_date
                         }
                         t_data["global_id"] = new_gid
                         active_gids_in_frame.add(new_gid)
                         log_attendance(new_gid, timestamp)
-                    if t_data["global_id"] is None and len(t_data["embeddings"]) >= MIN_SAMPLES:
+                    if t_data["global_id"] is None and len(t_data["embeddings"]) >= MIN_EMBEDS_FOR_MATCH:
                         track_centroid = np.mean(t_data["embeddings"], axis=0)
                         track_centroid = track_centroid / np.linalg.norm(track_centroid)
                         best_id, best_sim = find_match_with_margin(track_centroid, active_gids_in_frame)
@@ -1056,12 +1154,8 @@ class CrossDayAnalyzerWithCallbacks:
                             # BUILD_DB; in EVAL_DAY with a pre-existing gallery, similarities
                             # often land in the 0.35–0.55 gray zone and would leave every
                             # track permanently unidentified (resulting in 0 detections).
-                            if RUN_MODE == "BUILD_DB":
-                                new_gid = f"G_{next_global_id:03d}"
-                                next_global_id += 1
-                            else:
-                                new_gid = f"{DAY_LABEL}_V_{next_visitor_id:03d}"
-                                next_visitor_id += 1
+                            new_gid = f"G_{next_global_id:03d}"
+                            next_global_id += 1
                             global_gallery[new_gid] = {"exemplars": [track_centroid]}
                             t_data["global_id"] = new_gid
                             active_gids_in_frame.add(new_gid)
@@ -1094,7 +1188,15 @@ class CrossDayAnalyzerWithCallbacks:
                 
                 # Draw timestamp overlay once per frame (not per-person)
                 if save_output_video or self.frame_callback is not None or self.use_cv2_preview:
-                    cv2.putText(frame, f"Live: {timestamp}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.putText(
+                        frame,
+                        f"Live: {session_attendance_date} {timestamp}",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.85,
+                        (0, 255, 0),
+                        2,
+                    )
                 
                 if out is not None:
                     out.write(frame)
@@ -1134,6 +1236,133 @@ class CrossDayAnalyzerWithCallbacks:
         if self._should_stop():
             return ""
 
+        # Calendar days present in attendance (OCR-driven keys + any fallback)
+        for _gid, _gdata in global_gallery.items():
+            for dkey in _gdata.get("attendance", {}):
+                if dkey and dkey not in operational_dates:
+                    operational_dates.append(dkey)
+        operational_dates.sort()
+
+        # ---------------------------------------------------------------
+        # POST-VIDEO BACKGROUND IDENTITY PASS
+        # Tracks that collected face embeddings but never reached min_embeds_for_match
+        # (or exited the frame too early) are given one final matching attempt
+        # against the full gallery. This recovers identities that were
+        # partially scanned while in-frame but never triggered the live
+        # assignment logic.
+        # ---------------------------------------------------------------
+        self._log("Running post-video identity resolution...", "info")
+        self._progress(91, "Post-video identity resolution...")
+        resolved_post = 0
+        for t_id, t_data in track_vault.items():
+            embs = t_data.get("embeddings") or []
+            cur_gid = t_data.get("global_id")
+            # Only re-examine unassigned tracks or body-only NF_ slots with face data
+            needs_resolve = (cur_gid is None and len(embs) >= MIN_POST_SAMPLES) or \
+                            (_is_nf_id(cur_gid) and len(embs) >= MIN_POST_SAMPLES)
+            if not needs_resolve:
+                continue
+
+            track_centroid = np.mean(embs, axis=0)
+            track_centroid = track_centroid / np.linalg.norm(track_centroid)
+
+            # Search against ALL gallery entries (active_gids guard removed — video is done)
+            best_id, best_sim = None, 0.0
+            for g_id, data in global_gallery.items():
+                ex_list = data.get("exemplars") or []
+                if not ex_list:
+                    continue
+                sim = max(1 - cosine(track_centroid, ex) for ex in ex_list)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_id = g_id
+
+            if best_id and best_sim > T_STRICT_MERGE:
+                # Remove old NF_ slot if present
+                if cur_gid and _is_nf_id(cur_gid):
+                    nf_att = global_gallery.pop(cur_gid, {}).get("attendance", {})
+                    ba = global_gallery[best_id].setdefault("attendance", {})
+                    for dkey, slot in nf_att.items():
+                        if dkey not in ba:
+                            ba[dkey] = dict(slot)
+                        else:
+                            ex = ba[dkey]
+                            if slot["entry"] < ex["entry"]:
+                                ex["entry"] = slot["entry"]
+                            if slot["exit"] > ex["exit"]:
+                                ex["exit"] = slot["exit"]
+                t_data["global_id"] = best_id
+                update_exemplars(best_id, track_centroid)
+                ids_seen_this_video.add(str(best_id))
+                self._log(f"  Post-resolve: track {t_id} → {best_id} (sim={best_sim:.3f})", "info")
+                resolved_post += 1
+            elif cur_gid is None and len(embs) >= MIN_POST_SAMPLES:
+                # Still unassigned — create a proper face-based identity now
+                new_gid = f"G_{next_global_id:03d}"
+                next_global_id += 1
+                first_seen = t_data.get("first_seen", "00:00:00")
+                last_seen = t_data.get("last_seen", "00:00:00")
+                global_gallery[new_gid] = {
+                    "exemplars": [track_centroid],
+                    "attendance": {
+                        session_attendance_date: {"entry": first_seen, "exit": last_seen}
+                    },
+                    "join_date": session_attendance_date,
+                }
+                t_data["global_id"] = new_gid
+                ids_seen_this_video.add(str(new_gid))
+                self._log(f"  Post-resolve: track {t_id} → new {new_gid} (no match, sim={best_sim:.3f})", "info")
+                resolved_post += 1
+
+        if resolved_post:
+            self._log(f"Post-video pass resolved {resolved_post} additional track(s).", "success")
+        else:
+            self._log("Post-video pass: no additional identities resolved.", "info")
+
+        # ---------------------------------------------------------------
+        # BACKGROUND STUDENT MATCH PASS
+        # After the gallery is fully built/updated, do a comprehensive
+        # student-DB match against ALL tracks that collected face embeddings
+        # (including NF_ slots), not just those that received a G_ id
+        # during frame processing. Upgrades NF_ → enrolled_student when
+        # a confident match exists in the student DB.
+        # ---------------------------------------------------------------
+        if student_db:
+            self._log("Running background student match on all face tracks...", "info")
+            upgraded_to_student = 0
+            for t_id, t_data in track_vault.items():
+                embs = t_data.get("embeddings") or []
+                cur_gid = t_data.get("global_id")
+                if not embs or not cur_gid:
+                    continue
+                g_data = global_gallery.get(cur_gid)
+                if not g_data:
+                    continue
+                # Skip if already mapped by map_identities_to_students()
+                if g_data.get("engagement_id") is not None:
+                    continue
+                # Try direct track embeddings vs student DB (not just gallery exemplars)
+                best_eng_id, best_sim = None, -1.0
+                for eng_id, stu_data in student_db.items():
+                    stu_exemplars = (stu_data or {}).get("exemplars") or []
+                    for cctv_emb in embs:
+                        for stu_emb in stu_exemplars:
+                            sim = 1 - cosine(cctv_emb, stu_emb)
+                            if sim > best_sim:
+                                best_sim = sim
+                                best_eng_id = eng_id
+                if best_eng_id and best_sim > T_MATCH_STUDENT:
+                    g_data["engagement_id"] = best_eng_id
+                    g_data["batch"] = (student_db.get(best_eng_id) or {}).get("batch")
+                    g_data["confidence"] = float(best_sim)
+                    self._log(
+                        f"  BG student match: {cur_gid} → {best_eng_id} (sim={best_sim:.3f})",
+                        "info"
+                    )
+                    upgraded_to_student += 1
+            if upgraded_to_student:
+                self._log(f"Background student pass matched {upgraded_to_student} additional identity(ies).", "success")
+
         # Enrolled student mapping before summary/reporting.
         map_identities_to_students()
 
@@ -1149,6 +1378,9 @@ class CrossDayAnalyzerWithCallbacks:
         for old_vid in visitors_to_upgrade:
             new_gid = f"G_{next_global_id:03d}"
             next_global_id += 1
+            if str(old_vid) in ids_seen_this_video:
+                ids_seen_this_video.discard(str(old_vid))
+                ids_seen_this_video.add(str(new_gid))
             global_gallery[new_gid] = global_gallery.pop(old_vid)
             self._log(f"Upgraded {old_vid} to {new_gid}", "success")
         
@@ -1218,10 +1450,11 @@ class CrossDayAnalyzerWithCallbacks:
         _save_db(save_path)
         self._log(f"Database saved: {save_path}", "success")
         
-        # Generate report
+        # Generate report (unique filename per run so BigQuery sync_log ≠ same basename for every video)
         self._log("Generating report...")
         self._progress(96, "Generating report...")
-        
+        run_folder = os.path.basename(os.path.normpath(self.output_dir))
+
         def calculate_duration(entry_str, exit_str):
             fmt = '%H:%M:%S'
             try:
@@ -1232,9 +1465,11 @@ class CrossDayAnalyzerWithCallbacks:
         
         report = {
             "Session": {
-                "date": CURRENT_DATE,
+                "date": session_attendance_date,
                 "camera": "Cam_01",
                 "source_video": os.path.basename(self.video_path),
+                "run_folder": run_folder,
+                "report_people_scope": "this_video_only",
                 "duration": "00:00:00"
             },
             "Counts": {
@@ -1247,23 +1482,30 @@ class CrossDayAnalyzerWithCallbacks:
             "People": []
         }
         
-        current_dt = datetime.strptime(CURRENT_DATE, "%Y-%m-%d")
+        current_dt = datetime.strptime(session_attendance_date, "%Y-%m-%d")
         latest_exit_time = "00:00:00"
         
         for g_id, g_data in global_gallery.items():
+            if str(g_id) not in ids_seen_this_video:
+                continue
             attendance = g_data.get("attendance", {})
-            if CURRENT_DATE not in attendance:
+            if session_attendance_date not in attendance:
                 continue
             
-            entry_time = attendance[CURRENT_DATE]["entry"]
-            exit_time = attendance[CURRENT_DATE]["exit"]
+            entry_time = attendance[session_attendance_date]["entry"]
+            exit_time = attendance[session_attendance_date]["exit"]
             duration = calculate_duration(entry_time, exit_time)
             
             if exit_time > latest_exit_time:
                 latest_exit_time = exit_time
             
-            is_new_walk_in = g_data.get("join_date") == CURRENT_DATE
-            
+            is_new_walk_in = g_data.get("join_date") == session_attendance_date
+            # Returning only if they were present on a *prior* calendar day; same-date-only
+            # ledger entries are not "returning" (e.g. first sighting today after DB merge).
+            has_prior_day_attendance = any(
+                d < session_attendance_date for d in attendance.keys()
+            )
+
             person_dict = {
                 "id": g_id,
                 "engagement_id": g_data.get("engagement_id"),
@@ -1271,7 +1513,8 @@ class CrossDayAnalyzerWithCallbacks:
                 "entry": entry_time,
                 "exit": exit_time,
                 "duration_sec": duration,
-                "confidence_score": g_data.get("confidence", 0.0)
+                "confidence_score": g_data.get("confidence", 0.0),
+                "visit_days_count": len(attendance),
             }
             
             if _is_nf_id(g_id):
@@ -1289,9 +1532,9 @@ class CrossDayAnalyzerWithCallbacks:
                 person_dict["last_present_date"] = None
                 person_dict["present_last_7_days"] = 0
                 report["Counts"]["visitors"] += 1
-            else:
+            elif has_prior_day_attendance:
                 person_dict["type"] = "returning_employee"
-                past_dates = [d for d in attendance.keys() if d < CURRENT_DATE]
+                past_dates = [d for d in attendance.keys() if d < session_attendance_date]
                 past_dates.sort(reverse=True)
                 person_dict["last_present_date"] = past_dates[0] if past_dates else None
                 
@@ -1303,7 +1546,12 @@ class CrossDayAnalyzerWithCallbacks:
                 person_dict["present_last_7_days"] = present_last_7
                 
                 report["Counts"]["returning"] += 1
-            
+            else:
+                person_dict["type"] = "visitor"
+                person_dict["last_present_date"] = None
+                person_dict["present_last_7_days"] = 0
+                report["Counts"]["visitors"] += 1
+
             report["People"].append(person_dict)
         
         report["Counts"]["unique_people"] = (
@@ -1313,7 +1561,7 @@ class CrossDayAnalyzerWithCallbacks:
         )
         report["Session"]["duration"] = latest_exit_time
         
-        report_path = os.path.join(self.output_dir, f"{CURRENT_DATE.replace('-', '_')}_attendance_report.json")
+        report_path = os.path.join(self.output_dir, f"{run_folder}_attendance_report.json")
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=4)
         

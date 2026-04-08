@@ -84,11 +84,11 @@ DAY_LABEL = "Day1"
 VERIFICATION_DIR = os.path.join(SCRIPT_DIR, "verification_matches") 
 VISITOR_UPGRADE_DAYS = 3  
 
-# ArcFace Specific Thresholds
-T_STRICT_MERGE = 0.55  
-T_NEW_ID = 0.35        
-T_RATIO_MARGIN = 0.10 
-MIN_SAMPLES = 8       
+# ArcFace / InsightFace thresholds (aligned with app crossday defaults)
+T_STRICT_MERGE = 0.36
+T_NEW_ID = 0.22
+T_RATIO_MARGIN = 0.05
+MIN_SAMPLES = 2
 MAX_EXEMPLARS = 5     
 T_OUTLIER = 0.6     
 T_MATCH_STUDENT = 0.40  
@@ -152,7 +152,6 @@ class UniversalMultiRepSystem:
         self.global_gallery = {} 
         self.track_vault = {}    
         self.next_global_id = 1
-        self.next_visitor_id = 1
         self.track_offset = 0  # <--- YOU MUST ADD THIS LINE
         self.operational_dates = []
         
@@ -163,8 +162,15 @@ class UniversalMultiRepSystem:
                 self.global_gallery = db_data.get("gallery", {})
                 self.operational_dates = db_data.get("operational_dates", [])
             
-            g_ids = [k for k in self.global_gallery.keys() if k.startswith('G_')]
-            if g_ids: self.next_global_id = len(g_ids) + 1
+            m = 0
+            for k in self.global_gallery.keys():
+                s = str(k)
+                if s.startswith("G_"):
+                    try:
+                        m = max(m, int(s.split("_", 1)[1]))
+                    except (ValueError, IndexError):
+                        pass
+            self.next_global_id = m + 1
             print(f"Loaded {len(self.global_gallery)} total identities.")
         else:
             print("No database found. Starting fresh.")
@@ -340,13 +346,8 @@ class UniversalMultiRepSystem:
                     active_gids_in_frame.add(best_id)
                     self.log_attendance(best_id, timestamp)
                 elif best_sim < T_NEW_ID:
-                    if RUN_MODE == "BUILD_DB":
-                        new_gid = f"G_{self.next_global_id:03d}"
-                        self.next_global_id += 1
-                    else:
-                        new_gid = f"{DAY_LABEL}_V_{self.next_visitor_id:03d}"
-                        self.next_visitor_id += 1
-                        
+                    new_gid = f"G_{self.next_global_id:03d}"
+                    self.next_global_id += 1
                     self.global_gallery[new_gid] = {"exemplars": [track_centroid]}
                     t_data["global_id"] = new_gid
                     active_gids_in_frame.add(new_gid)
@@ -496,7 +497,8 @@ class UniversalMultiRepSystem:
             if exit_time > latest_exit_time: latest_exit_time = exit_time
 
             is_new_walk_in = g_data.get("join_date") == CURRENT_DATE
-            
+            has_prior_day_attendance = any(d < CURRENT_DATE for d in attendance.keys())
+
             person_dict = {
                 "id": g_id,
                 "engagement_id": g_data.get("engagement_id"),
@@ -515,9 +517,12 @@ class UniversalMultiRepSystem:
             elif is_new_walk_in:
                 person_dict["type"] = "visitor"
                 report["Counts"]["visitors"] += 1
-            else:
+            elif has_prior_day_attendance:
                 person_dict["type"] = "returning_employee"
                 report["Counts"]["returning"] += 1
+            else:
+                person_dict["type"] = "visitor"
+                report["Counts"]["visitors"] += 1
             
             # is_new_walk_in = g_data.get("join_date") == CURRENT_DATE
             

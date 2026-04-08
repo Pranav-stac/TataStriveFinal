@@ -4,6 +4,7 @@ A professional desktop application for classroom analysis and attendance trackin
 """
 
 import os
+import shutil
 import sys
 
 # Force CPU mode to avoid CUDA DLL errors on Windows (must be before any torch import)
@@ -11,9 +12,44 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 from pathlib import Path
 
-# Add the project root to path
+
+def _merge_partial_app_overlay_from_bundle() -> None:
+    """
+    Delta patches only ship changed files. If app/ exists next to the exe but is
+    incomplete, Python would load that partial package first and crash (e.g. no
+    app.config). Copy any missing modules from the bundled _internal/app tree.
+    """
+    if not getattr(sys, "frozen", False) or not hasattr(sys, "_MEIPASS"):
+        return
+    exe_dir = Path(sys.executable).resolve().parent
+    overlay = exe_dir / "app"
+    bundle_app = Path(sys._MEIPASS) / "app"
+    if not overlay.is_dir() or not bundle_app.is_dir():
+        return
+    for src in bundle_app.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(bundle_app)
+        dest = overlay / rel
+        if not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+
+
+# Dev: repo root on path. Frozen: bundle first; prepend exe dir only if overlay is complete
+# (after merge) so "import app" sees patched files without a broken partial package.
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+if getattr(sys, "frozen", False):
+    _merge_partial_app_overlay_from_bundle()
+    exe_dir = Path(sys.executable).resolve().parent
+    sys.path.insert(0, str(project_root))
+    if (exe_dir / "app" / "config.py").is_file():
+        sys.path.insert(0, str(exe_dir))
+else:
+    sys.path.insert(0, str(project_root))
+
+# Version string for About / updater (reads app/__init__.py from overlay when patched)
+from app import __version__
 
 # When frozen (PyInstaller): add DLL search paths so onnxruntime and its deps are found
 # (Works from source; fails in exe due to different DLL search order / VC++ runtime)
@@ -97,7 +133,7 @@ def main():
             sys.exit(1)
 
     app.setApplicationName("TataStrive Analytics")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("TataStrive")
 
     # Set application icon
@@ -167,7 +203,6 @@ def _start_update_polling(window, app) -> None:
     When a newer release exists, the patch is downloaded and applied in the
     background and the process restarts — no dialogs or clicks.
     """
-    from app import __version__
     from app.updater import UpdateChecker
 
     checker = UpdateChecker(current_version=__version__, silent_auto_apply=True)

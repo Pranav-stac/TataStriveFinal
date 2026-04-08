@@ -100,7 +100,10 @@ def build():
     resources_dir = app_dir / "resources"
     dist_dir = project_root / "dist"
     build_dir = project_root / "build"
-    env_file = project_root / ".env"
+    # Bundle real .env when present; otherwise bundle .env.example so the exe always has the template + link.
+    _env_local = project_root / ".env"
+    _env_example = project_root / ".env.example"
+    env_for_bundle = _env_local if _env_local.exists() else _env_example
     
     # Pre-build: ensure required models exist
     print("Ensuring required models...")
@@ -170,11 +173,12 @@ def build():
     if models_dir.exists():
         args.append(f"--add-data={models_dir};Models")
 
-    # Bundle .env so packaged app can read GROQ_API_KEY.
-    # We also copy it beside the exe post-build for load_dotenv() defaults.
-    if env_file.exists():
-        args.append(f"--add-data={env_file};.")
-        print("Bundling .env for runtime API key loading...")
+    # Bundle .env (or .env.example) so packaged app can read GROQ_API_KEY.
+    # Post-build also copies beside the exe for load_dotenv() defaults.
+    if env_for_bundle.exists():
+        label = ".env" if env_for_bundle == _env_local else ".env.example"
+        args.append(f"--add-data={env_for_bundle};.")
+        print(f"Bundling {label} for runtime API key loading...")
 
     # Bundle root-level YOLO / ReID weights (searched by workers at runtime)
     for pt_name in ["yolov8n.pt", "yolov8m.pt", "yolov8n-pose.pt", "osnet_x1_0_msmt17.pt"]:
@@ -286,10 +290,10 @@ def build():
         print("Note: Run the app once in dev to download buffalo_l to ~/.insightface/models/, then rebuild to bundle it.")
 
     # Copy .env beside the executable so load_dotenv() picks it up by default.
-    if env_file.exists():
+    if env_for_bundle.exists():
         env_dst = dist_dir / "TataStriveAnalytics" / ".env"
-        shutil.copy2(env_file, env_dst)
-        print("Copied .env to output folder.")
+        shutil.copy2(env_for_bundle, env_dst)
+        print("Copied .env to output folder (from project root .env or .env.example).")
     
     # Create batch files to run the app (cd ensures DLLs load from exe's folder)
     exe_dir = dist_dir / "TataStriveAnalytics"

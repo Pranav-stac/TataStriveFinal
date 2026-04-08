@@ -35,6 +35,7 @@ class CrossDayTab(QWidget):
         self._watch_timer.timeout.connect(self._poll_video_folder)
         self._pending_videos = []
         self._known_videos = set()
+        self._completed_videos = set()  # persisted; survives restart / app update
         self._size_probe = {}
         self._current_video = ""
         self._current_run_output_dir = ""
@@ -149,6 +150,39 @@ class CrossDayTab(QWidget):
             self.output_picker.set_path(last_output)
 
         self.video_preview.set_enabled(self.config.get("preview_enabled", False))
+        self._reload_completed_videos()
+
+    @staticmethod
+    def _norm_video_path(p: str) -> str:
+        if not p:
+            return ""
+        return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+
+    def _reload_completed_videos(self):
+        """Load completed paths for the current input folder from config (resume after restart)."""
+        raw = self.config.get("crossday_completed_videos") or {}
+        folder = self.video_picker.get_path().strip()
+        if not folder:
+            self._completed_videos = set()
+            return
+        fn = self._norm_video_path(folder)
+        if self._norm_video_path(raw.get("folder") or "") != fn:
+            self._completed_videos = set()
+            return
+        self._completed_videos = {self._norm_video_path(p) for p in (raw.get("paths") or []) if p}
+
+    def _persist_completed_videos(self):
+        folder = self.video_picker.get_path().strip()
+        if not folder:
+            return
+        self.config.set(
+            "crossday_completed_videos",
+            {
+                "folder": self._norm_video_path(folder),
+                "paths": sorted(self._completed_videos),
+            },
+            save=True,
+        )
 
     def _save_config(self):
         self.config.set("last_crossday_video_folder", self.video_picker.get_path(), save=False)
@@ -162,6 +196,7 @@ class CrossDayTab(QWidget):
     # ── Slot handlers ────────────────────────────────────────────────
 
     def _on_video_changed(self, path: str):
+        self._reload_completed_videos()
         if path and os.path.isdir(path):
             if not self.output_picker.get_path():
                 self.output_picker.set_path(os.path.join(path, "Outputs"))
@@ -232,6 +267,11 @@ class CrossDayTab(QWidget):
         self._size_probe.clear()
         self._current_video = ""
         self._current_run_output_dir = ""
+        self._reload_completed_videos()
+        if self._completed_videos:
+            self.progress_panel.log_info(
+                f"Resume: {len(self._completed_videos)} video(s) already completed in this folder — will skip."
+            )
         self._poll_video_folder()
         self._watch_timer.start()
 
@@ -268,6 +308,9 @@ class CrossDayTab(QWidget):
         if report_path:
             self.progress_panel.update_progress(100, "Complete")
             self.progress_panel.log_success(f"Analysis complete! Report saved to: {report_path}")
+            if self._current_video:
+                self._completed_videos.add(self._norm_video_path(self._current_video))
+                self._persist_completed_videos()
             # Delete source video if setting is enabled
             if self._current_video and self.config.get("crossday.delete_video_after_processing", False):
                 try:
@@ -326,6 +369,8 @@ class CrossDayTab(QWidget):
                 continue
             if not name.lower().endswith(self.VIDEO_EXTENSIONS):
                 continue
+            if self._norm_video_path(file_path) in self._completed_videos:
+                continue
             if file_path in self._known_videos or file_path in self._pending_videos or file_path == self._current_video:
                 continue
             try:
@@ -373,10 +418,10 @@ class CrossDayTab(QWidget):
             "run_mode": mode,
             "current_date": datetime.now().strftime("%Y-%m-%d"),
             "day_label": day_label,
-            "t_strict_merge": crossday_config.get("t_strict_merge", 0.55),
-            "t_new_id": crossday_config.get("t_new_id", 0.35),
-            "t_ratio_margin": crossday_config.get("t_ratio_margin", 0.10),
-            "min_samples": crossday_config.get("min_samples", 8),
+            "t_strict_merge": crossday_config.get("t_strict_merge", 0.36),
+            "t_new_id": crossday_config.get("t_new_id", 0.22),
+            "t_ratio_margin": crossday_config.get("t_ratio_margin", 0.05),
+            "min_samples": crossday_config.get("min_samples", 2),
             "visitor_upgrade_days": crossday_config.get("visitor_upgrade_days", 3),
         }
         inference_cfg = self.config.get_section("inference") or {}
@@ -399,9 +444,10 @@ class CrossDayTab(QWidget):
             config=worker_config,
             preview_enabled=self.video_preview.is_enabled()
         )
-        self._worker.progress.connect(self._on_progress)
-        self._worker.log_message.connect(self._on_log)
-        self._worker.frame_ready.connect(self.video_preview.update_frame)
+        qc = Qt.ConnectionType.QueuedConnection
+        self._worker.progress.connect(self._on_progress, qc)
+        self._worker.log_message.connect(self._on_log, qc)
+        self._worker.frame_ready.connect(self.video_preview.update_frame, qc)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
@@ -436,3 +482,7 @@ class CrossDayTab(QWidget):
 
     def is_monitoring(self) -> bool:
         return self._is_monitoring
+
+    def pending_video_queue_count(self) -> int:
+        """Videos still waiting in the folder-listener queue (after current one finishes)."""
+        return len(self._pending_videos)

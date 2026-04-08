@@ -1,0 +1,35 @@
+{
+    "Session": {
+        "date": "2026-04-01",
+        "camera": "Cam_01",
+        "source_video": "D14_20260324091456.mp4",
+        "duration": "09:15:43",
+        "run_folder": "D14_20260324091456_recovery",
+        "report_people_scope": "this_video_only"
+    },
+    "Counts": {
+        "unique_people": 6,
+        "nf_presence": 10,
+        "returning": 0,
+        "visitors": 6,
+        "identified_students": 0
+    },
+    "People": [
+        {"id": "G_001", "engagement_id": null, "batch": null, "entry": "09:03:44", "exit": "09:04:05", "duration_sec": 21, "confidence_score": 0.0, "visit_days_count": 1, "type": "visitor", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "G_002", "engagement_id": null, "batch": null, "entry": "09:03:48", "exit": "09:05:13", "duration_sec": 85, "confidence_score": 0.0, "visit_days_count": 1, "type": "visitor", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_003", "engagement_id": null, "batch": null, "entry": "09:03:59", "exit": "09:04:00", "duration_sec": 1, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_004", "engagement_id": null, "batch": null, "entry": "09:04:00", "exit": "09:04:00", "duration_sec": 0, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "G_003", "engagement_id": null, "batch": null, "entry": "09:04:02", "exit": "09:04:14", "duration_sec": 12, "confidence_score": 0.0, "visit_days_count": 1, "type": "visitor", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_006", "engagement_id": null, "batch": null, "entry": "09:05:06", "exit": "09:05:07", "duration_sec": 1, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_007", "engagement_id": null, "batch": null, "entry": "09:08:20", "exit": "09:08:25", "duration_sec": 5, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_008", "engagement_id": null, "batch": null, "entry": "09:10:01", "exit": "09:10:05", "duration_sec": 4, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "G_004", "engagement_id": null, "batch": null, "entry": "09:10:05", "exit": "09:10:10", "duration_sec": 5, "confidence_score": 0.0, "visit_days_count": 1, "type": "visitor", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_009", "engagement_id": null, "batch": null, "entry": "09:10:27", "exit": "09:10:32", "duration_sec": 5, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_010", "engagement_id": null, "batch": null, "entry": "09:10:33", "exit": "09:10:34", "duration_sec": 1, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_011", "engagement_id": null, "batch": null, "entry": "09:10:38", "exit": "09:10:39", "duration_sec": 1, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_012", "engagement_id": null, "batch": null, "entry": "09:14:09", "exit": "09:14:10", "duration_sec": 1, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "G_005", "engagement_id": null, "batch": null, "entry": "09:14:10", "exit": "09:14:14", "duration_sec": 4, "confidence_score": 0.0, "visit_days_count": 1, "type": "visitor", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "NF_013", "engagement_id": null, "batch": null, "entry": "09:14:59", "exit": "09:15:00", "duration_sec": 1, "confidence_score": 0.0, "visit_days_count": 1, "type": "no_face_track", "last_present_date": null, "present_last_7_days": 0},
+        {"id": "G_006", "engagement_id": null, "batch": null, "entry": "09:15:39", "exit": "09:15:43", "duration_sec": 4, "confidence_score": 0.0, "visit_days_count": 1, "type": "visitor", "last_present_date": null, "present_last_7_days": 0}
+    ]
+}

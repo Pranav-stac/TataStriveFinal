@@ -46,21 +46,78 @@ from urllib.request import Request, urlopen
 # ─────────────────────────────────────────────────────────────────────────────
 #  Configuration  ← set GITHUB_REPO to your "owner/repo" before deploying
 # ─────────────────────────────────────────────────────────────────────────────
-GITHUB_REPO          = os.getenv("TATASTRIVE_GITHUB_REPO", "OWNER/TataStriveFinal")
+GITHUB_REPO          = os.getenv("TATASTRIVE_GITHUB_REPO", "Pranav-stac/TataStriveFinal")
 GITHUB_API           = "https://api.github.com"
 UPDATE_CHECK_TIMEOUT = 10    # seconds – version check (fast, non-blocking)
 DOWNLOAD_TIMEOUT     = 180   # seconds – patch ZIP download
 
-# Default polling interval: check for updates every 60 minutes while the app
-# is running.  Change to e.g. 30 for faster detection during testing.
-DEFAULT_POLL_INTERVAL_MINUTES = 60
+# Polling interval while the app is running (minutes). Set back to 60 for production.
+DEFAULT_POLL_INTERVAL_MINUTES = 1
 
 # How long to wait after startup before the first check (gives the app time
 # to finish loading before hitting the network).
 STARTUP_DELAY_SECONDS = 20
 
-# Absolute path to the directory that contains run_app.py / app/
-APP_ROOT = Path(__file__).resolve().parent.parent
+def get_patch_root() -> Path:
+    """
+    Where patch ZIP contents are extracted.
+    - Dev: repo root (same folder as run_app.py).
+    - Frozen: folder containing the .exe — NOT sys._MEIPASS. PyInstaller only
+      imports loose app/ next to the exe if that path is first on sys.path (see main.py).
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+PATCH_ROOT = get_patch_root()
+
+
+def _local_file_path(rel: str) -> Path:
+    """File used for manifest hash checks: overlay next to exe, else bundled copy."""
+    p = rel.replace("\\", "/").lstrip("/")
+    if getattr(sys, "frozen", False):
+        exe_root = Path(sys.executable).resolve().parent
+        cand = exe_root / p
+        if cand.is_file():
+            return cand
+        if hasattr(sys, "_MEIPASS"):
+            return Path(sys._MEIPASS) / p
+        return cand
+    return PATCH_ROOT / p
+
+
+def _clear_pycache_for_py_paths(rel_paths: List[str]) -> None:
+    """Remove __pycache__ next to patched .py files so the next run loads new source."""
+    seen: set[Path] = set()
+    for rel in rel_paths:
+        if not rel.endswith(".py"):
+            continue
+        p = rel.replace("\\", "/").lstrip("/")
+        for parent in {_local_file_path(rel).parent, (PATCH_ROOT / p).parent}:
+            if parent in seen:
+                continue
+            seen.add(parent)
+            pycache = parent / "__pycache__"
+            if pycache.is_dir():
+                shutil.rmtree(pycache, ignore_errors=True)
+
+
+def _backup_source_path(rel: str) -> Path:
+    """Existing file to back up before overwriting (overlay or bundle)."""
+    rel = rel.replace("\\", "/").lstrip("/")
+    if getattr(sys, "frozen", False):
+        exe_root = Path(sys.executable).resolve().parent
+        p = rel
+        cand = exe_root / p
+        if cand.is_file():
+            return cand
+        if hasattr(sys, "_MEIPASS"):
+            b = Path(sys._MEIPASS) / p
+            if b.is_file():
+                return b
+        return cand
+    return PATCH_ROOT / rel
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -346,11 +403,11 @@ class UpdateChecker:
             return None
 
         # Compute true delta: skip files whose local hash already matches
-        changed_entries = [
-            entry for entry in manifest.get("files", [])
-            if not (APP_ROOT / entry["path"]).exists()
-            or _sha256(APP_ROOT / entry["path"]) != entry["sha256"]
-        ]
+        changed_entries = []
+        for entry in manifest.get("files", []):
+            lp = _local_file_path(entry["path"])
+            if not lp.is_file() or _sha256(lp) != entry["sha256"]:
+                changed_entries.append(entry)
 
         if not changed_entries:
             print("[Updater] Remote version newer but all local files already match.")
@@ -385,18 +442,22 @@ class UpdateChecker:
                     done_cb(False, "Downloaded file is corrupted (not a valid ZIP).")
                 return
 
-            # Back up files that will be overwritten
+            # Back up files that will be overwritten (overlay next to exe, else bundle)
             with zipfile.ZipFile(patch_path, "r") as zf:
                 for name in zf.namelist():
-                    target = APP_ROOT / name
-                    if target.exists():
+                    if name.endswith("/"):
+                        continue
+                    src = _backup_source_path(name)
+                    if src.is_file():
                         bk = backup_dir / name
                         bk.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(target, bk)
+                        shutil.copy2(src, bk)
 
-            # Extract patch
+            # Extract patch next to exe (frozen) or repo root (dev)
             with zipfile.ZipFile(patch_path, "r") as zf:
-                zf.extractall(APP_ROOT)
+                zf.extractall(PATCH_ROOT)
+
+            _clear_pycache_for_py_paths(info.changed_files)
 
             n = len(info.changed_files)
             if done_cb:
@@ -409,7 +470,7 @@ class UpdateChecker:
                     for src in backup_dir.rglob("*"):
                         if src.is_file():
                             rel  = src.relative_to(backup_dir)
-                            dest = APP_ROOT / rel
+                            dest = PATCH_ROOT / rel
                             dest.parent.mkdir(parents=True, exist_ok=True)
                             dest.write_bytes(src.read_bytes())
                 print("[Updater] Rollback complete.")

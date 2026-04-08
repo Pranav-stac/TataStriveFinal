@@ -7,9 +7,34 @@ Full implementation matching classroom_activity_1.py (V14 - FINAL INTEGRATED PIP
 import os
 import sys
 import traceback
-from typing import Dict, Any, Optional, Callable
+from pathlib import Path
+from typing import Dict, Any, Optional, Callable, List
 
 import numpy as np
+
+
+def _purge_ultralytics_weight_cache(filename: str) -> None:
+    """Remove cached .pt copies so YOLO(name) can download a clean checkpoint."""
+    roots: List[Path] = [
+        Path.home() / ".cache" / "ultralytics",
+        Path.home() / ".cache" / "torch" / "hub",
+    ]
+    if sys.platform == "win32":
+        la = os.environ.get("LOCALAPPDATA", "")
+        if la:
+            roots.append(Path(la) / "Ultralytics")
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for p in root.rglob(filename):
+                if p.is_file():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 from PyQt6.QtCore import QThread, pyqtSignal
 
 # Add parent directory to path for imports
@@ -422,19 +447,60 @@ class FaceEngagementAnalyzerWithCallbacks:
         self._log(f"Running on: {device}")
         
         # Resolve Models path (project root or frozen app)
+        # Frozen: prefer Models/ next to the exe (build_exe post-build copy; user can replace
+        # bad .pt files without rebuilding), then _internal/Models from PyInstaller add-data.
+        base_path = None
         try:
-            base_path = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if getattr(sys, "frozen", False):
+                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+                exe_models = os.path.join(exe_dir, "Models")
+                bundle_models = os.path.join(sys._MEIPASS, "Models")
+                if os.path.isdir(exe_models):
+                    weights_dir = exe_models
+                elif os.path.isdir(bundle_models):
+                    weights_dir = bundle_models
+                else:
+                    weights_dir = sys._MEIPASS
+            else:
+                base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                weights_dir = os.path.join(base_path, "Models")
+                if not os.path.exists(weights_dir):
+                    weights_dir = base_path
         except Exception:
             base_path = os.getcwd()
-        weights_dir = os.path.join(base_path, "Models")
-        if not os.path.exists(weights_dir):
-            weights_dir = base_path
-        
-        # Load models (check Models/ first; face model not in ultralytics, must be downloaded)
+            weights_dir = os.path.join(base_path, "Models")
+            if not os.path.exists(weights_dir):
+                weights_dir = base_path
+
+        def _yolo_weight_candidates(weight_file: str) -> List[str]:
+            """All locations build_exe / runtime may place a .pt (order = load preference)."""
+            if getattr(sys, "frozen", False):
+                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+                mp = sys._MEIPASS
+                return [
+                    os.path.join(exe_dir, "Models", weight_file),
+                    os.path.join(exe_dir, weight_file),
+                    os.path.join(weights_dir, weight_file),
+                    os.path.join(mp, "Models", weight_file),
+                    os.path.join(mp, weight_file),
+                ]
+            bp = base_path or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            return [
+                os.path.join(weights_dir, weight_file),
+                os.path.join(bp, "Models", weight_file),
+                os.path.join(bp, weight_file),
+            ]
+
+        # Load models (check Models/ first; face model not in ultralytics hub — custom file)
         models = {}
         for name, file in {'detection': 'yolov8m.pt', 'pose': 'yolov8n-pose.pt', 'face': 'yolov8n-face.pt'}.items():
-            path = os.path.join(weights_dir, file)
-            load_name = path if os.path.exists(path) else file
+            candidates = _yolo_weight_candidates(file)
+            path = None
+            for c in candidates:
+                if os.path.isfile(c):
+                    path = c
+                    break
+            load_name = path if path else file
             try:
                 m = YOLO(load_name)
                 m.to(device)
@@ -443,7 +509,32 @@ class FaceEngagementAnalyzerWithCallbacks:
                 models[name] = m
                 self._log(f"Loaded {name} model")
             except Exception as e:
-                self._log(f"Warning: Could not load {name} model: {e}", "warning")
+                # Corrupt local .pt or corrupt hub cache — remove all known copies, purge cache, re-fetch
+                if name in ('detection', 'pose'):
+                    self._log(f"Weight load failed ({file}): {e}", "warning")
+                    removed = 0
+                    for c in candidates:
+                        if os.path.isfile(c):
+                            try:
+                                os.remove(c)
+                                removed += 1
+                            except OSError:
+                                pass
+                    if removed:
+                        self._log(f"Removed {removed} bad on-disk copy(s) of {file}", "warning")
+                    _purge_ultralytics_weight_cache(file)
+                    self._log(f"Purged Ultralytics/torch cache for {file}; re-downloading…", "warning")
+                    try:
+                        m = YOLO(file)
+                        m.to(device)
+                        if hasattr(m.model, 'fuse'):
+                            m.model.fuse()
+                        models[name] = m
+                        self._log(f"Loaded {name} model")
+                    except Exception as e2:
+                        self._log(f"Warning: Could not load {name} model: {e2}", "warning")
+                else:
+                    self._log(f"Warning: Could not load {name} model: {e}", "warning")
         
         # Open video
         self._log(f"Opening video: {self.video_path}")

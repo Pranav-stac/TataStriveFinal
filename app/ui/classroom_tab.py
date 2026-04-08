@@ -34,6 +34,7 @@ class ClassroomTab(QWidget):
         self._watch_timer.timeout.connect(self._poll_video_folder)
         self._pending_videos = []
         self._known_videos = set()
+        self._completed_videos = set()  # persisted; survives restart / app update
         self._size_probe = {}
         self._current_video = ""
         self._is_monitoring = False
@@ -116,6 +117,38 @@ class ClassroomTab(QWidget):
             self.output_picker.set_path(last_output)
 
         self.video_preview.set_enabled(self.config.get("preview_enabled", False))
+        self._reload_completed_videos()
+
+    @staticmethod
+    def _norm_video_path(p: str) -> str:
+        if not p:
+            return ""
+        return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+
+    def _reload_completed_videos(self):
+        raw = self.config.get("classroom_completed_videos") or {}
+        folder = self.video_picker.get_path().strip()
+        if not folder:
+            self._completed_videos = set()
+            return
+        fn = self._norm_video_path(folder)
+        if self._norm_video_path(raw.get("folder") or "") != fn:
+            self._completed_videos = set()
+            return
+        self._completed_videos = {self._norm_video_path(p) for p in (raw.get("paths") or []) if p}
+
+    def _persist_completed_videos(self):
+        folder = self.video_picker.get_path().strip()
+        if not folder:
+            return
+        self.config.set(
+            "classroom_completed_videos",
+            {
+                "folder": self._norm_video_path(folder),
+                "paths": sorted(self._completed_videos),
+            },
+            save=True,
+        )
 
     def _save_config(self):
         self.config.set("last_classroom_video_folder", self.video_picker.get_path(), save=False)
@@ -126,6 +159,7 @@ class ClassroomTab(QWidget):
         self._load_config()
 
     def _on_video_changed(self, path: str):
+        self._reload_completed_videos()
         if path and os.path.isdir(path):
             if not self.output_picker.get_path():
                 self.output_picker.set_path(os.path.join(path, "analysis_output"))
@@ -185,6 +219,11 @@ class ClassroomTab(QWidget):
         self._known_videos.clear()
         self._size_probe.clear()
         self._current_video = ""
+        self._reload_completed_videos()
+        if self._completed_videos:
+            self.progress_panel.log_info(
+                f"Resume: {len(self._completed_videos)} video(s) already completed in this folder — will skip."
+            )
         self._poll_video_folder()
         self._watch_timer.start()
 
@@ -219,6 +258,9 @@ class ClassroomTab(QWidget):
         if report_path:
             self.progress_panel.update_progress(100, "Complete")
             self.progress_panel.log_success(f"Analysis complete! Report saved to: {report_path}")
+            if self._current_video:
+                self._completed_videos.add(self._norm_video_path(self._current_video))
+                self._persist_completed_videos()
             # Delete source video if setting is enabled
             if self._current_video and self.config.get("classroom.delete_video_after_processing", False):
                 try:
@@ -271,6 +313,8 @@ class ClassroomTab(QWidget):
             if not os.path.isfile(file_path):
                 continue
             if not name.lower().endswith(self.VIDEO_EXTENSIONS):
+                continue
+            if self._norm_video_path(file_path) in self._completed_videos:
                 continue
             if file_path in self._known_videos or file_path in self._pending_videos or file_path == self._current_video:
                 continue
@@ -341,3 +385,7 @@ class ClassroomTab(QWidget):
 
     def is_monitoring(self) -> bool:
         return self._is_monitoring
+
+    def pending_video_queue_count(self) -> int:
+        """Videos still waiting in the folder-listener queue (after current one finishes)."""
+        return len(self._pending_videos)

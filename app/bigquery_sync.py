@@ -11,6 +11,7 @@ Handles:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -119,6 +120,8 @@ SYNC_LOG_SCHEMA = [
     {"name": "rows_inserted", "type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "status",        "type": "STRING",    "mode": "NULLABLE"},   # "ok" | "error"
     {"name": "error_msg",     "type": "STRING",    "mode": "NULLABLE"},
+    # Folder-listener: videos still waiting after this sync (auto-sync only; NULL for batch/manual)
+    {"name": "videos_in_queue", "type": "INTEGER", "mode": "NULLABLE"},
 ]
 
 
@@ -169,6 +172,8 @@ class BigQuerySyncService:
         self._client = None
         self._lock = threading.Lock()
         self._last_sync_date: Optional[date] = None
+        # Persisted map: center_id -> sha256(content) -> metadata (dedupe append-only inserts)
+        self._dedupe_path = Path.home() / ".tatastrive" / "bq_synced_report_hashes.json"
 
     # ------------------------------------------------------------------
     # Client
@@ -279,20 +284,109 @@ class BigQuerySyncService:
         except Exception as e:
             print(f"[BQ] Column migration warning for {full_table}: {e}")
 
+    def _dataset_location(self, client) -> str:
+        """BigQuery dataset location (e.g. US). Queries must run in this region."""
+        from google.cloud import bigquery
+
+        ds_id = f"{self._project_id}.{DATASET_ID}"
+        try:
+            ds = client.get_dataset(ds_id)
+            return ds.location or "US"
+        except Exception:
+            return "US"
+
+    def _run_query(self, client, sql: str, location: str):
+        # Pass location on client.query() — QueryJobConfig.location is not settable in some client versions.
+        job = client.query(sql, location=location)
+        job.result()
+        return job
+
+    def _table_row_count(self, client, fqtn: str, location: str) -> int:
+        """COUNT(*) for a fully-qualified `project.dataset.table` identifier."""
+        sql = f"SELECT COUNT(1) AS c FROM {fqtn}"
+        rows = list(client.query(sql, location=location).result())
+        if not rows:
+            return 0
+        return int(rows[0].c or 0)
+
     def truncate_all_tables(self) -> Dict[str, str]:
         """
         Remove all rows from attendance_reports, engagement_reports, and sync_log.
         Tables and schemas are kept; use before a full re-sync from local reports.
+
+        Verifies row count after TRUNCATE; if rows remain, runs DELETE WHERE TRUE
+        (handles edge cases with partitioned tables / buffered rows).
         """
         with self._lock:
             client = self._get_client()
+            location = self._dataset_location(client)
             out: Dict[str, str] = {}
             for table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE, SYNC_LOG_TABLE):
                 fqtn = f"`{self._project_id}.{DATASET_ID}.{table_name}`"
-                job = client.query(f"TRUNCATE TABLE {fqtn}")
-                job.result()
-                out[table_name] = "truncated"
+                self._run_query(client, f"TRUNCATE TABLE {fqtn}", location)
+                n = self._table_row_count(client, fqtn, location)
+                if n > 0:
+                    self._run_query(client, f"DELETE FROM {fqtn} WHERE TRUE", location)
+                    n = self._table_row_count(client, fqtn, location)
+                out[table_name] = "truncated" if n == 0 else f"rows_remain_{n}"
             return out
+
+    def drop_and_recreate_tables(self) -> Dict[str, str]:
+        """
+        DROP attendance_reports, engagement_reports, sync_log and recreate empty.
+
+        Use when TRUNCATE/DELETE still leave rows: the app uses **streaming inserts**
+        (`insert_rows_json`), and BigQuery can keep a streaming buffer that does not
+        always clear cleanly with TRUNCATE alone.
+        """
+        with self._lock:
+            client = self._get_client()
+            for table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE, SYNC_LOG_TABLE):
+                fq = f"{self._project_id}.{DATASET_ID}.{table_name}"
+                client.delete_table(fq, not_found_ok=True)
+        self.ensure_tables()
+        with self._lock:
+            client = self._get_client()
+            location = self._dataset_location(client)
+            out: Dict[str, str] = {}
+            for table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE, SYNC_LOG_TABLE):
+                fqtn = f"`{self._project_id}.{DATASET_ID}.{table_name}`"
+                n = self._table_row_count(client, fqtn, location)
+                out[table_name] = "empty" if n == 0 else f"rows_remain_{n}"
+            return out
+
+    # ------------------------------------------------------------------
+    # Dedupe: same report file must not insert twice (startup folder scan +
+    # per-completion sync, or app relaunch re-scanning the same JSON).
+    # ------------------------------------------------------------------
+
+    def _load_dedupe_state(self) -> Dict[str, Any]:
+        try:
+            if self._dedupe_path.exists():
+                with open(self._dedupe_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+        return {"by_center": {}}
+
+    def _save_dedupe_state(self, state: Dict[str, Any]) -> None:
+        try:
+            self._dedupe_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._dedupe_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except OSError as e:
+            print(f"[BQ] Could not save dedupe state: {e}")
+
+    def _prune_dedupe_center(self, center_map: Dict[str, Any], max_entries: int = 8000) -> None:
+        if len(center_map) <= max_entries:
+            return
+        items = []
+        for h, meta in center_map.items():
+            ts = (meta or {}).get("synced_at") or ""
+            items.append((ts, h))
+        items.sort()
+        for _, h in items[: len(center_map) - max_entries]:
+            center_map.pop(h, None)
 
     # ------------------------------------------------------------------
     # Report detection & routing
@@ -306,31 +400,73 @@ class BigQuerySyncService:
             return "attendance"
         return "unknown"
 
-    def sync_report(self, report_path: str) -> Dict[str, Any]:
+    def sync_report(
+        self,
+        report_path: str,
+        videos_in_queue: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Parse a JSON report file and insert rows into BigQuery.
         Returns a dict with keys: status, rows_inserted, error_msg.
-        """
-        result = {"status": "ok", "rows_inserted": 0, "error_msg": ""}
-        try:
-            self.ensure_tables()  # Guarantee migration runs (adds engagement_id, etc.)
-            with open(report_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
 
-            rtype = self.detect_report_type(data)
-            if rtype == "attendance":
-                rows = self._build_attendance_rows(data, report_path)
-                self._insert_rows(ATTENDANCE_TABLE, rows)
-            elif rtype == "engagement":
-                rows = self._build_engagement_rows(data, report_path)
-                self._insert_rows(ENGAGEMENT_TABLE, rows)
-            else:
-                result["status"] = "skipped"
-                result["error_msg"] = "Unknown report type"
+        status may be:
+          - "ok" — rows inserted
+          - "skipped" — unknown report type, or **already_synced** (same file bytes
+            were pushed for this center_id; avoids doubling rows on re-scan / relaunch)
+          - "error"
+
+        videos_in_queue: optional count of videos still pending in the folder listener
+        when this sync ran (stored in sync_log for ops visibility).
+        """
+        result: Dict[str, Any] = {"status": "ok", "rows_inserted": 0, "error_msg": ""}
+        path = os.path.abspath(os.path.normpath(report_path))
+        try:
+            if not os.path.isfile(path):
+                result["status"] = "error"
+                result["error_msg"] = f"Report not found: {path}"
                 return result
 
-            result["rows_inserted"] = len(rows)
-            self._log_sync(report_path, rtype, len(rows), "ok", "")
+            self.ensure_tables()  # Guarantee migration runs (adds engagement_id, etc.)
+
+            with open(path, "rb") as f:
+                raw = f.read()
+            digest = hashlib.sha256(raw).hexdigest()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                result["status"] = "error"
+                result["error_msg"] = "Report file is not valid UTF-8"
+                return result
+            data = json.loads(text)
+
+            with self._lock:
+                state = self._load_dedupe_state()
+                cmap = state.setdefault("by_center", {}).setdefault(self.center_id, {})
+                if digest in cmap:
+                    result["status"] = "skipped"
+                    result["error_msg"] = "already_synced"
+                    return result
+
+                rtype = self.detect_report_type(data)
+                if rtype == "attendance":
+                    rows = self._build_attendance_rows(data, path)
+                    self._insert_rows(ATTENDANCE_TABLE, rows)
+                elif rtype == "engagement":
+                    rows = self._build_engagement_rows(data, path)
+                    self._insert_rows(ENGAGEMENT_TABLE, rows)
+                else:
+                    result["status"] = "skipped"
+                    result["error_msg"] = "Unknown report type"
+                    return result
+
+                result["rows_inserted"] = len(rows)
+                cmap[digest] = {
+                    "synced_at": self._now_ts(),
+                    "report_file": Path(path).name,
+                }
+                self._prune_dedupe_center(cmap)
+                self._save_dedupe_state(state)
+                self._log_sync(path, rtype, len(rows), "ok", "", videos_in_queue)
 
         except Exception as e:
             msg = f"{e}\n{traceback.format_exc()}"
@@ -338,12 +474,12 @@ class BigQuerySyncService:
             result["error_msg"] = str(e)
             rtype = "unknown"
             try:
-                with open(report_path) as f:
-                    d = json.load(f)
+                with open(path, "rb") as f:
+                    d = json.loads(f.read().decode("utf-8"))
                 rtype = self.detect_report_type(d)
             except Exception:
                 pass
-            self._log_sync(report_path, rtype, 0, "error", str(e)[:1000])
+            self._log_sync(path, rtype, 0, "error", str(e)[:1000], videos_in_queue)
 
         return result
 
@@ -373,7 +509,8 @@ class BigQuerySyncService:
 
     def _build_attendance_rows(self, data: Dict, report_path: str) -> List[Dict]:
         """
-        One BigQuery row per person in the attendance report.
+        One BigQuery row per person in the attendance report (first row wins if the same
+        person_id appears more than once in People).
         Plus always at least one summary row (even if no people).
         """
         ts = self._now_ts()
@@ -409,10 +546,17 @@ class BigQuerySyncService:
             return [row]
 
         rows = []
+        seen_person_ids: set[str] = set()
         for person in people:
+            pid = person.get("id")
+            if pid is not None and str(pid).strip() != "":
+                key = str(pid)
+                if key in seen_person_ids:
+                    continue
+                seen_person_ids.add(key)
             row = dict(base)
             row.update({
-                "person_id":           person.get("id"),
+                "person_id":           pid,
                 "person_type":         person.get("type"),
                 "engagement_id":       person.get("engagement_id"),
                 "batch":               person.get("batch"),
@@ -529,10 +673,17 @@ class BigQuerySyncService:
     # Sync log
     # ------------------------------------------------------------------
 
-    def _log_sync(self, report_path: str, rtype: str,
-                  rows: int, status: str, error_msg: str) -> None:
+    def _log_sync(
+        self,
+        report_path: str,
+        rtype: str,
+        rows: int,
+        status: str,
+        error_msg: str,
+        videos_in_queue: Optional[int] = None,
+    ) -> None:
         try:
-            self._insert_rows(SYNC_LOG_TABLE, [{
+            row = {
                 "center_id":     self.center_id,
                 "sync_ts":       self._now_ts(),
                 "report_file":   Path(report_path).name,
@@ -540,7 +691,9 @@ class BigQuerySyncService:
                 "rows_inserted": rows,
                 "status":        status,
                 "error_msg":     error_msg,
-            }])
+                "videos_in_queue": videos_in_queue,
+            }
+            self._insert_rows(SYNC_LOG_TABLE, [row])
         except Exception as e:
             print(f"[BQ] Could not write sync log: {e}")
 

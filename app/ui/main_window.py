@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QSize, QMetaObject, Q_ARG, pyqtSlot
 from PyQt6.QtGui import QAction, QIcon, QCloseEvent
 
+from app import __version__
 from app.config import get_config
 from app.ui.classroom_tab import ClassroomTab
 from app.ui.crossday_tab import CrossDayTab
@@ -43,7 +44,10 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         """Setup the main UI components."""
         center_id = self.config.get("center_id", "")
-        title = f"TataStrive Analytics  |  Center: {center_id}" if center_id else "TataStrive Analytics"
+        if center_id:
+            title = f"TataStrive Analytics v{__version__}  |  Center: {center_id}"
+        else:
+            title = f"TataStrive Analytics v{__version__}"
         self.setWindowTitle(title)
         self.setMinimumSize(1000, 700)
 
@@ -193,7 +197,7 @@ class MainWindow(QMainWindow):
         self._center_label.setObjectName("centerLabel")
         self.statusbar.addPermanentWidget(self._center_label)
 
-        self.status_label = QLabel("TataStrive Analytics v1.0")
+        self.status_label = QLabel(f"TataStrive Analytics v{__version__}")
         self.statusbar.addPermanentWidget(self.status_label)
 
     # ──────────────────────────────────────────────────────────────────
@@ -229,7 +233,7 @@ class MainWindow(QMainWindow):
             done_callback=self.on_bq_sync_done
         )
 
-    def _sync_single_report(self, report_path: str):
+    def _sync_single_report(self, report_path: str, videos_in_queue: int | None = None):
         """Auto-sync a single newly completed report immediately."""
         if self._bq_service is None or not report_path:
             return
@@ -239,11 +243,19 @@ class MainWindow(QMainWindow):
         def _run():
             try:
                 self._bq_service.ensure_tables()
-                result = self._bq_service.sync_report(report_path)
+                result = self._bq_service.sync_report(report_path, videos_in_queue=videos_in_queue)
                 if result["status"] == "ok":
                     msg = (
                         f"✅ BigQuery: synced {result['rows_inserted']} rows "
                         f"from {Path(report_path).name}"
+                    )
+                elif (
+                    result["status"] == "skipped"
+                    and result.get("error_msg") == "already_synced"
+                ):
+                    msg = (
+                        f"☁ BigQuery: skipped duplicate (same report already synced) — "
+                        f"{Path(report_path).name}"
                     )
                 else:
                     msg = f"⚠ BigQuery sync issue: {result.get('error_msg', '')}"
@@ -400,8 +412,9 @@ class MainWindow(QMainWindow):
     def _on_classroom_complete(self, report_path: str):
         """Handle classroom analysis completion — view report + auto-sync."""
         self.statusbar.showMessage(f"Analysis complete: {report_path}")
-        # Auto-sync the new report immediately
-        self._sync_single_report(report_path)
+        # Auto-sync the new report immediately (queue depth for BigQuery sync_log)
+        q = self.classroom_tab.pending_video_queue_count()
+        self._sync_single_report(report_path, videos_in_queue=q)
         if not self.classroom_tab.is_monitoring():
             reply = QMessageBox.question(
                 self, "Analysis Complete",
@@ -415,8 +428,9 @@ class MainWindow(QMainWindow):
     def _on_crossday_complete(self, report_path: str):
         """Handle attendance analysis completion — view report + auto-sync."""
         self.statusbar.showMessage(f"Analysis complete: {report_path}")
-        # Auto-sync the new report immediately
-        self._sync_single_report(report_path)
+        # Auto-sync the new report immediately (queue depth for BigQuery sync_log)
+        q = self.crossday_tab.pending_video_queue_count()
+        self._sync_single_report(report_path, videos_in_queue=q)
         if not self.crossday_tab.is_monitoring():
             reply = QMessageBox.question(
                 self, "Analysis Complete",

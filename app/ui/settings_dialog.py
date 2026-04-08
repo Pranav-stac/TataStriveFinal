@@ -120,13 +120,16 @@ class SettingsDialog(QDialog):
         crossday_group = QGroupBox("Attendance Defaults")
         crossday_form = QVBoxLayout(crossday_group)
         
-        # T_STRICT_MERGE
+        # T_STRICT_MERGE (lower = more lenient / easier to match same person)
         strict_layout = QHBoxLayout()
-        strict_layout.addWidget(QLabel("Strict Merge Threshold:"))
+        strict_layout.addWidget(QLabel("Match similarity (lower = lenient):"))
         self.t_strict_merge_spin = QDoubleSpinBox()
-        self.t_strict_merge_spin.setRange(0.3, 0.9)
+        self.t_strict_merge_spin.setRange(0.15, 0.9)
         self.t_strict_merge_spin.setSingleStep(0.05)
         self.t_strict_merge_spin.setDecimals(2)
+        self.t_strict_merge_spin.setToolTip(
+            "Minimum similarity to reuse an existing face id (G_*). Lower = easier matches; higher = stricter."
+        )
         strict_layout.addWidget(self.t_strict_merge_spin)
         strict_layout.addStretch()
         crossday_form.addLayout(strict_layout)
@@ -138,6 +141,9 @@ class SettingsDialog(QDialog):
         self.t_new_id_spin.setRange(0.1, 0.6)
         self.t_new_id_spin.setSingleStep(0.05)
         self.t_new_id_spin.setDecimals(2)
+        self.t_new_id_spin.setToolTip(
+            "When best match is weaker than this, a new id may be created (depends on mode)."
+        )
         new_id_layout.addWidget(self.t_new_id_spin)
         new_id_layout.addStretch()
         crossday_form.addLayout(new_id_layout)
@@ -146,10 +152,12 @@ class SettingsDialog(QDialog):
         margin_layout = QHBoxLayout()
         margin_layout.addWidget(QLabel("Ratio Margin:"))
         self.t_ratio_margin_spin = QDoubleSpinBox()
-        self.t_ratio_margin_spin.setRange(0.05, 0.3)
-        self.t_ratio_margin_spin.setSingleStep(0.05)
+        self.t_ratio_margin_spin.setRange(0.02, 0.3)
+        self.t_ratio_margin_spin.setSingleStep(0.02)
         self.t_ratio_margin_spin.setDecimals(2)
-        self.t_ratio_margin_spin.setToolTip("Minimum gap between best and second-best match (default: 0.10)")
+        self.t_ratio_margin_spin.setToolTip(
+            "Min. lead of best vs 2nd gallery match. Smaller = more lenient (accept closer races)."
+        )
         margin_layout.addWidget(self.t_ratio_margin_spin)
         margin_layout.addStretch()
         crossday_form.addLayout(margin_layout)
@@ -158,7 +166,10 @@ class SettingsDialog(QDialog):
         samples_layout = QHBoxLayout()
         samples_layout.addWidget(QLabel("Min Samples:"))
         self.min_samples_spin = QSpinBox()
-        self.min_samples_spin.setRange(3, 20)
+        self.min_samples_spin.setRange(1, 20)
+        self.min_samples_spin.setToolTip(
+            "Max face embeddings to collect per track; matching can start earlier (min_embeds_for_match in config)"
+        )
         samples_layout.addWidget(self.min_samples_spin)
         samples_layout.addStretch()
         crossday_form.addLayout(samples_layout)
@@ -313,10 +324,10 @@ class SettingsDialog(QDialog):
         
         # Cross-day
         crossday = self.config.get_section("crossday")
-        self.t_strict_merge_spin.setValue(crossday.get("t_strict_merge", 0.55))
-        self.t_new_id_spin.setValue(crossday.get("t_new_id", 0.35))
-        self.t_ratio_margin_spin.setValue(crossday.get("t_ratio_margin", 0.10))
-        self.min_samples_spin.setValue(crossday.get("min_samples", 8))
+        self.t_strict_merge_spin.setValue(crossday.get("t_strict_merge", 0.36))
+        self.t_new_id_spin.setValue(crossday.get("t_new_id", 0.22))
+        self.t_ratio_margin_spin.setValue(crossday.get("t_ratio_margin", 0.05))
+        self.min_samples_spin.setValue(crossday.get("min_samples", 2))
         self.visitor_upgrade_spin.setValue(crossday.get("visitor_upgrade_days", 3))
         self.save_video_checkbox.setChecked(crossday.get("save_output_video", False))
         self.delete_video_crossday_checkbox.setChecked(crossday.get("delete_video_after_processing", False))

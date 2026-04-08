@@ -88,7 +88,9 @@ class ProgressPanel(QFrame):
     @pyqtSlot(int, str)
     def update_progress(self, percent: int, message: str = ""):
         """Update progress bar and status."""
-        self.progress_bar.setValue(percent)
+        if self.progress_bar.maximum() == 0:
+            self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(min(100, max(0, percent)))
         if message:
             self.status_label.setText(message)
             
@@ -165,6 +167,8 @@ class ProgressPanel(QFrame):
         
     def reset(self):
         """Reset progress and log."""
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
         self.status_label.setText("Ready")
         self.clear_log()

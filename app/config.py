@@ -18,7 +18,12 @@ class ConfigManager:
         "last_video_folder": "",
         "last_output_dir": "",
         "last_classroom_output_dir": "",
+        "last_classroom_video_folder": "",
         "last_crossday_output_dir": "",
+        "last_crossday_video_folder": "",
+        # Folder listener: videos successfully processed (survives app restart / update)
+        "crossday_completed_videos": {"folder": "", "paths": []},
+        "classroom_completed_videos": {"folder": "", "paths": []},
         "last_db_path": "",
         "bigquery": {
             "auto_sync": True,         # Trigger daily sync automatically
@@ -35,10 +40,15 @@ class ConfigManager:
             "delete_video_after_processing": False
         },
         "crossday": {
-            "t_strict_merge": 0.50,  # Lowered from 0.55 for run-to-run matching on same video
-            "t_new_id": 0.35,
-            "t_ratio_margin": 0.10,
-            "min_samples": 8,
+            # Face gallery: slightly strict to separate identities; margin only when 2nd is also strong
+            "t_strict_merge": 0.36,
+            "t_new_id": 0.22,
+            "t_ratio_margin": 0.05,
+            # With face pipeline on, wait this many frames before NF_* (gives InsightFace time to crop)
+            "nf_min_frames_before_label": 12,
+            "min_samples": 2,  # Stop collecting face crops after this many (centroid stability)
+            "min_embeds_for_match": 1,  # Try gallery match with this many embeddings (1 = first InsightFace vec)
+            "min_post_samples": 2,  # Post-video pass: min embeddings to resolve track
             "max_exemplars": 5,
             "t_outlier": 0.6,
             "t_match_student": 0.40,
@@ -92,6 +102,7 @@ class ConfigManager:
                     loaded = json.load(f)
                 # Merge with defaults to handle new keys
                 self._config = self._deep_merge(self.DEFAULT_CONFIG.copy(), loaded)
+                self._migrate_crossday_face_defaults()
                 # Migrate to match unique_and_recognition.py defaults
                 inf = self._config.get("inference") or {}
                 if inf.get("yolo_imgsz") == 416 or inf.get("face_det_size") == 416:
@@ -127,6 +138,58 @@ class ConfigManager:
             else:
                 result[key] = value
         return result
+
+    def _migrate_crossday_face_defaults(self) -> None:
+        """
+        Persisted config.json overrides DEFAULT_CONFIG, so old strict Settings values
+        (e.g. t_strict_merge=0.9, min_samples=9) never picked up new lenient defaults.
+        One-time migration when face_match_defaults_revision < 2.
+        """
+        cd = self._config.setdefault("crossday", {})
+        try:
+            old_rev = int(cd.get("face_match_defaults_revision", 0))
+        except (TypeError, ValueError):
+            old_rev = 0
+        if old_rev >= 2:
+            return
+
+        d = self.DEFAULT_CONFIG["crossday"]
+        changed = False
+
+        try:
+            strict = float(cd.get("t_strict_merge", d["t_strict_merge"]))
+        except (TypeError, ValueError):
+            strict = float(d["t_strict_merge"])
+        if strict >= 0.70:
+            cd["t_strict_merge"] = d["t_strict_merge"]
+            changed = True
+
+        try:
+            nid = float(cd.get("t_new_id", d["t_new_id"]))
+        except (TypeError, ValueError):
+            nid = float(d["t_new_id"])
+        if nid <= 0.12:
+            cd["t_new_id"] = d["t_new_id"]
+            changed = True
+
+        try:
+            ms = int(cd.get("min_samples", d["min_samples"]))
+        except (TypeError, ValueError):
+            ms = int(d["min_samples"])
+        if ms >= 6:
+            cd["min_samples"] = d["min_samples"]
+            changed = True
+
+        if changed:
+            cd["t_ratio_margin"] = d["t_ratio_margin"]
+            if "min_embeds_for_match" in d:
+                cd["min_embeds_for_match"] = d["min_embeds_for_match"]
+            if "min_post_samples" in d:
+                cd["min_post_samples"] = d["min_post_samples"]
+
+        cd["face_match_defaults_revision"] = 2
+        if changed or old_rev < 2:
+            self._save()
     
     def get(self, key: str, default: Any = None) -> Any:
         """

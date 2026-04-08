@@ -25,6 +25,9 @@ Usage
     $env:GITHUB_REPO  = "your-org/TataStriveFinal"
     python scripts/publish_update.py --version 1.1.0 --changelog "Fixed X, added Y"
 
+    # Option C — dev machine: copy .env.publish.example to .env.publish and add PAT
+    # (gitignored; never put PAT in .env or it may get bundled into the exe)
+
 Prerequisites
 -------------
     - Python 3.9+  (stdlib only — no third-party packages needed)
@@ -48,11 +51,37 @@ from typing import Dict, List, Optional
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+REPO_ROOT_FOR_ENV = Path(__file__).resolve().parent.parent
+
+
+def _load_dev_publish_env() -> None:
+    """
+    On your dev machine, put GITHUB_TOKEN (and optional GITHUB_REPO) in
+    project-root `.env.publish` (copy from `.env.publish.example`).
+    That file is gitignored and is never bundled by build_exe.py — unlike `.env`.
+    """
+    path = REPO_ROOT_FOR_ENV / ".env.publish"
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key == "GITHUB_TOKEN" and val and not os.environ.get("GITHUB_TOKEN"):
+            os.environ["GITHUB_TOKEN"] = val
+        if key == "GITHUB_REPO" and val and not os.environ.get("GITHUB_REPO"):
+            os.environ["GITHUB_REPO"] = val
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  Config  ← set GITHUB_REPO_DEFAULT to your "owner/repo"
+#  Config
 # ─────────────────────────────────────────────────────────────────────────────
-GITHUB_REPO_DEFAULT = os.getenv("GITHUB_REPO", "OWNER/TataStriveFinal")
-GITHUB_API          = "https://api.github.com"
+GITHUB_API = "https://api.github.com"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # project root
 
@@ -153,7 +182,7 @@ def bump_version_in_source(version: str) -> None:
         print(f"[Publisher] Version pattern not found in {init_path} — skipping bump.")
         return
     init_path.write_text(updated, encoding="utf-8")
-    print(f"[Publisher] Bumped __version__ → {version}")
+    print(f"[Publisher] Bumped __version__ -> {version}")
 
     # Also patch app/main.py  (app.setApplicationVersion)
     main_path = REPO_ROOT / "app" / "main.py"
@@ -166,7 +195,7 @@ def bump_version_in_source(version: str) -> None:
         )
         if mu != mc:
             main_path.write_text(mu, encoding="utf-8")
-            print(f"[Publisher] Patched setApplicationVersion → {version}")
+            print(f"[Publisher] Patched setApplicationVersion -> {version}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -253,7 +282,7 @@ def upload_release_asset(
 
 def publish(version: str, token: str, repo: str, changelog: str) -> None:
     print(f"\n{'='*60}")
-    print(f"  TataStrive Publisher  —  v{version}  →  {repo}")
+    print(f"  TataStrive Publisher  --  v{version}  ->  {repo}")
     print(f"{'='*60}\n")
 
     # 1. Bump version in source files
@@ -306,13 +335,13 @@ def publish(version: str, token: str, repo: str, changelog: str) -> None:
     print("\n[Publisher] Creating GitHub release…")
     release    = create_github_release(repo, token, version, changelog)
     upload_url = release["upload_url"]
-    print(f"[Publisher] Release URL  →  {release['html_url']}")
+    print(f"[Publisher] Release URL: {release['html_url']}")
 
     # 7. Upload assets
     upload_release_asset(upload_url, token, "manifest.json", manifest_bytes, "application/json")
     upload_release_asset(upload_url, token, "patch.zip",     patch_bytes,    "application/zip")
 
-    print(f"\n✓  Release v{version} is live.")
+    print(f"\n[OK] Release v{version} is live.")
     print(f"   {release['html_url']}")
     print(f"   Clients will auto-update on next startup.\n")
 
@@ -322,6 +351,9 @@ def publish(version: str, token: str, repo: str, changelog: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    _load_dev_publish_env()
+    repo_default = os.getenv("GITHUB_REPO", "Pranav-stac/TataStriveFinal")
+
     parser = argparse.ArgumentParser(
         description="Publish a TataStrive delta update to GitHub Releases",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -334,12 +366,12 @@ def main() -> None:
     parser.add_argument(
         "--token", "-t",
         default=os.getenv("GITHUB_TOKEN"),
-        help="GitHub Personal Access Token (or set $GITHUB_TOKEN)",
+        help="GitHub Personal Access Token (or set $GITHUB_TOKEN, or .env.publish)",
     )
     parser.add_argument(
         "--repo", "-r",
-        default=GITHUB_REPO_DEFAULT,
-        help='GitHub repo in owner/name format (or set $GITHUB_REPO)',
+        default=repo_default,
+        help='GitHub repo in owner/name format (or set $GITHUB_REPO, or .env.publish)',
     )
     parser.add_argument(
         "--changelog", "-c",
@@ -354,9 +386,9 @@ def main() -> None:
             "Pass --token ghp_xxxx  or  set the GITHUB_TOKEN environment variable."
         )
 
-    if args.repo == "OWNER/TataStriveFinal":
+    if args.repo in ("OWNER/TataStriveFinal", ""):
         parser.error(
-            "Please set --repo owner/TataStriveFinal  or the GITHUB_REPO env var "
+            "Please set --repo owner/repo  or the GITHUB_REPO env var "
             "to your actual GitHub repository."
         )
 
