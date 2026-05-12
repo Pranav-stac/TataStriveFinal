@@ -7,7 +7,7 @@ import os
 import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, Optional, Callable
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -821,14 +821,14 @@ class CrossDayAnalyzerWithCallbacks:
             return d_iso, t_str
 
         def read_ocr_overlay_frame(frame):
-            """OCR timestamp ROI: returns (date YYYY-MM-DD or None, time HH:MM:SS or None)."""
+            """OCR timestamp ROI: returns (date YYYY-MM-DD|None, time HH:MM:SS|None, raw_joined_text)."""
             if ocr_reader is None:
-                return None, None
+                return None, None, ""
             if frame is None or not hasattr(frame, "shape"):
-                return None, None
+                return None, None, ""
             x, y, w_roi, h_roi = timestamp_coords
             if y + h_roi > frame.shape[0] or x + w_roi > frame.shape[1]:
-                return None, None
+                return None, None, ""
             roi = frame[y:y + h_roi, x:x + w_roi]
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
             gray_large = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
@@ -840,7 +840,8 @@ class CrossDayAnalyzerWithCallbacks:
             allowlist = "0123456789:/.- MonTueWedThuFriSatSun"
             results = ocr_reader.readtext(final_img, allowlist=allowlist, detail=0)
             text = " ".join(results)
-            return parse_ocr_overlay_datetime(text)
+            d_iso, t_str = parse_ocr_overlay_datetime(text)
+            return d_iso, t_str, text
 
         def map_identities_to_students():
             if not student_db:
@@ -887,6 +888,9 @@ class CrossDayAnalyzerWithCallbacks:
             self._log("Using cv2.imshow preview (faster than PyQt)", "info")
         last_valid_timestamp = "00:00:00"
         _last_emit_pct = -1
+        _last_ocr_parsed_log: Tuple[Any, Any] = (None, None)
+        _logged_first_nonempty_ocr_raw = False
+        session_date_set_from_ocr = False
         executor = ThreadPoolExecutor(max_workers=2)
         try:
             while cap.isOpened():
@@ -921,16 +925,32 @@ class CrossDayAnalyzerWithCallbacks:
                 
                 fallback_timestamp = datetime.fromtimestamp(frame_idx / max(1, fps)).strftime('%H:%M:%S')
                 if enable_ocr_timestamp and frame_idx % ocr_interval == 0:
-                    ocr_d, ocr_t = read_ocr_overlay_frame(frame)
+                    ocr_d, ocr_t, ocr_raw = read_ocr_overlay_frame(frame)
+                    raw_s = (ocr_raw or "").strip()
+                    pair = (ocr_d, ocr_t)
+                    if raw_s or ocr_d or ocr_t:
+                        ocr_log_this = (
+                            pair != _last_ocr_parsed_log
+                            or (raw_s and not _logged_first_nonempty_ocr_raw)
+                        )
+                        if ocr_log_this:
+                            _last_ocr_parsed_log = pair
+                            if raw_s:
+                                _logged_first_nonempty_ocr_raw = True
+                            self._log(
+                                f"OCR @frame {frame_idx}: raw={raw_s[:220]!r} → parsed date={ocr_d!r} time={ocr_t!r}",
+                                "info",
+                            )
                     if ocr_t:
                         last_valid_timestamp = ocr_t
                     if ocr_d:
                         session_attendance_date = ocr_d
+                        session_date_set_from_ocr = True
                         if RUN_MODE == "BUILD_DB" and ocr_d not in operational_dates:
                             operational_dates.append(ocr_d)
                             operational_dates.sort()
                         if not ocr_session_date_announced:
-                            self._log(f"OCR session date: {ocr_d}", "success")
+                            self._log(f"OCR session date (applied): {ocr_d}", "success")
                             ocr_session_date_announced = True
                 if enable_ocr_timestamp:
                     timestamp = last_valid_timestamp if last_valid_timestamp != "00:00:00" else fallback_timestamp
@@ -1449,6 +1469,21 @@ class CrossDayAnalyzerWithCallbacks:
 
         _save_db(save_path)
         self._log(f"Database saved: {save_path}", "success")
+
+        if enable_ocr_timestamp:
+            if session_date_set_from_ocr:
+                self._log(
+                    f"Session date for report: {session_attendance_date} "
+                    "(set from overlay OCR at least once).",
+                    "success",
+                )
+            else:
+                self._log(
+                    f"Session date for report: {session_attendance_date} "
+                    f"(configured current_date fallback; OCR never parsed a date). "
+                    f"Settings current_date={CURRENT_DATE!r}.",
+                    "warning",
+                )
         
         # Generate report (unique filename per run so BigQuery sync_log ≠ same basename for every video)
         self._log("Generating report...")

@@ -1,0 +1,4 @@
+# Flask dashboard for live BigQuery attendance + engagement insights
+flask>=3.0.0
+google-cloud-bigquery>=3.10.0
+google-auth>=2.20.0

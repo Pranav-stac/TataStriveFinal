@@ -5,6 +5,7 @@ Contains the tabbed interface, menu bar, and BigQuery sync integration.
 
 import os
 import sys
+import threading
 from pathlib import Path
 from datetime import date
 
@@ -13,7 +14,7 @@ from PyQt6.QtWidgets import (
     QMenuBar, QMenu, QStatusBar, QMessageBox, QFileDialog,
     QLabel, QApplication, QToolBar, QInputDialog
 )
-from PyQt6.QtCore import Qt, QSize, QMetaObject, Q_ARG, pyqtSlot
+from PyQt6.QtCore import Qt, QSize, QMetaObject, Q_ARG, pyqtSlot, QTimer
 from PyQt6.QtGui import QAction, QIcon, QCloseEvent
 
 from app import __version__
@@ -179,6 +180,12 @@ class MainWindow(QMainWindow):
 
         # ── Help ──────────────────────────────────────────────────────
         help_menu = menubar.addMenu("&Help")
+
+        check_updates_action = QAction("Check for &Updates…", self)
+        check_updates_action.triggered.connect(self._check_for_updates)
+        help_menu.addAction(check_updates_action)
+
+        help_menu.addSeparator()
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -199,6 +206,55 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel(f"TataStrive Analytics v{__version__}")
         self.statusbar.addPermanentWidget(self.status_label)
+
+    def _check_for_updates(self):
+        """
+        Manual update check (UI action).
+        - If a newer GitHub Release exists, show UpdateDialog.
+        - If up to date, show a status message.
+        """
+        from app.updater import UpdateChecker
+
+        checker = getattr(self, "_update_checker", None)
+        if checker is None:
+            checker = UpdateChecker(current_version=__version__, silent_auto_apply=False)
+            self._update_checker = checker
+
+        self.statusbar.showMessage("Checking for updates…")
+
+        def _worker():
+            try:
+                # Private but stable in our codebase; keeps manual button lightweight.
+                info = checker._fetch_latest_info()  # type: ignore[attr-defined]
+                err = ""
+            except Exception as e:
+                info = None
+                err = str(e)
+
+            def _on_ui():
+                if err:
+                    self.statusbar.showMessage(f"Update check failed: {err}")
+                    QMessageBox.warning(self, "Update Check Failed", err)
+                    return
+
+                if info is None:
+                    self.statusbar.showMessage("You’re up to date.")
+                    QMessageBox.information(
+                        self,
+                        "No Updates",
+                        f"You’re already on the latest version (v{__version__}).",
+                    )
+                    return
+
+                from app.ui.update_dialog import UpdateDialog
+
+                self.statusbar.showMessage(f"Update available: v{info.version}")
+                dlg = UpdateDialog(info, parent=self)
+                dlg.exec()
+
+            QTimer.singleShot(0, _on_ui)
+
+        threading.Thread(target=_worker, daemon=True, name="manual-update-check").start()
 
     # ──────────────────────────────────────────────────────────────────
     # BigQuery sync – manual & auto

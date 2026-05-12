@@ -65,7 +65,11 @@ def ensure_models(project_root: Path) -> bool:
 
 
 def get_onnxruntime_binaries():
-    """Get onnxruntime DLLs/pyd for bundling. PyInstaller often misses these."""
+    """
+    Get onnxruntime DLLs/pyd for bundling.
+    IMPORTANT: For maximum compatibility we bundle CPU-only essentials and
+    skip GPU provider DLLs (CUDA/TensorRT) that often fail on CPU machines.
+    """
     try:
         import onnxruntime as ort
         ort_dir = Path(ort.__file__).parent / "capi"
@@ -74,6 +78,10 @@ def get_onnxruntime_binaries():
         binaries = []
         for f in ort_dir.iterdir():
             if f.suffix in (".dll", ".pyd"):
+                name = f.name.lower()
+                # Skip GPU provider binaries for CPU-first deployments
+                if "providers_cuda" in name or "providers_tensorrt" in name:
+                    continue
                 # Dest: onnxruntime/capi/ so package finds them when frozen
                 binaries.append((str(f), "onnxruntime/capi"))
         return binaries
@@ -201,8 +209,8 @@ def build():
     if vcrt_binaries:
         print(f"Bundling VC++ runtime DLLs: {[Path(b[0]).name for b in vcrt_binaries]}")
     
-    # Collect all onnxruntime binaries using PyInstaller's collector
-    args.append("--collect-binaries=onnxruntime")
+    # NOTE: Do NOT use --collect-binaries=onnxruntime here; it can re-add CUDA/TensorRT
+    # provider DLLs which break CPU-only machines with "DLL load failed".
 
     # Bundle boxmot package data (CLIP bpe vocab etc.) so BoTSORT works in frozen app.
     # Fixes: [Errno 2] No such file or directory: '.../boxmot/.../bpe_simple_vocab_16e6.txt.gz'
@@ -263,7 +271,7 @@ def build():
     if creds_src.exists():
         creds_dst = dist_dir / "TataStriveAnalytics" / "credentials.json"
         shutil.copy2(creds_src, creds_dst)
-        print(f"Bundled credentials: {creds_src.name} → credentials.json (next to exe)")
+        print(f"Bundled credentials: {creds_src.name} -> credentials.json (next to exe)")
 
     # Post-build: Copy Models folder if exists
     models_src = project_root / "Models"

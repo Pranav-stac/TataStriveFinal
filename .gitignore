@@ -10,3 +10,11 @@ app/Creds/*.json
 .env
 # Dev-only GitHub PAT for scripts/publish_update.py — never bundle this
 .env.publish
+Outputs
+Screenshots
+looker
+flask_insights
+dist
+bq_summary_output
+docs
+.sqlite

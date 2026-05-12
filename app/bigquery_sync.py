@@ -40,6 +40,46 @@ def _try_import_bq():
 _try_import_bq()
 
 
+def _coerce_bq_date(value: Any) -> Optional[date]:
+    """
+    Parse a value into a calendar date for BigQuery DATE columns (date-only, no time).
+    Accepts datetime.date, datetime.datetime, ISO date/datetime strings, and common JSON shapes.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        core = s.replace("Z", "+00:00")
+        if "+" in core:
+            core = core.split("+", 1)[0].strip()
+        return datetime.fromisoformat(core).date()
+    except ValueError:
+        pass
+    if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
+        try:
+            return date.fromisoformat(s[:10])
+        except ValueError:
+            pass
+    return None
+
+
+def _date_only_string_field(value: Any) -> Optional[str]:
+    """Normalize optional date-like strings to YYYY-MM-DD; keep other strings as-is."""
+    if value is None:
+        return None
+    d = _coerce_bq_date(value)
+    if d is not None:
+        return d.isoformat()
+    s = str(value).strip()
+    return s or None
+
+
 # ---------------------------------------------------------------------------
 # BigQuery dataset / table names
 # ---------------------------------------------------------------------------
@@ -491,20 +531,18 @@ class BigQuerySyncService:
         """Return UTC timestamp in ISO 8601 format for BigQuery TIMESTAMP fields."""
         return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
-    def _parse_report_date(self, data: Dict) -> Optional[str]:
-        """Try to extract a YYYY-MM-DD date from the report."""
-        # Attendance report
+    def _parse_report_date(self, data: Dict) -> Optional[date]:
+        """Extract calendar date for BigQuery DATE column report_date (never a timestamp)."""
         session_date = (data.get("Session") or {}).get("date")
-        if session_date:
-            try:
-                datetime.strptime(session_date, "%Y-%m-%d")
-                return session_date
-            except ValueError:
-                pass
-        # Engagement report: recording_date may be a datetime string
+        if session_date is not None and str(session_date).strip() != "":
+            d = _coerce_bq_date(session_date)
+            if d is not None:
+                return d
         rec_date = data.get("recording_date", "") or ""
-        if rec_date and len(rec_date) >= 10:
-            return rec_date[:10]
+        if rec_date:
+            d = _coerce_bq_date(rec_date)
+            if d is not None:
+                return d
         return None
 
     def _build_attendance_rows(self, data: Dict, report_path: str) -> List[Dict]:
@@ -524,7 +562,7 @@ class BigQuerySyncService:
             "center_id":        self.center_id,
             "sync_timestamp":   ts,
             "report_date":      rdate,
-            "session_date":     session.get("date"),
+            "session_date":     _date_only_string_field(session.get("date")),
             "camera":           session.get("camera"),
             "source_video":     session.get("source_video"),
             "session_duration": session.get("duration"),
@@ -565,7 +603,7 @@ class BigQuerySyncService:
                 "duration_seconds":    person.get("duration_sec"),
                 "confidence_score":    person.get("confidence_score"),
                 "present_last_7_days": person.get("present_last_7_days"),
-                "last_present_date":   person.get("last_present_date"),
+                "last_present_date":   _date_only_string_field(person.get("last_present_date")),
             })
             rows.append(row)
         return rows

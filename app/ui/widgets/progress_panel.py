@@ -136,6 +136,19 @@ class ProgressPanel(QFrame):
         """Log a success message."""
         self.log(message, "success")
 
+    def log_batched_queued_videos(self, new_paths: list) -> None:
+        """Single log entry for many videos queued in one poll cycle (avoids QTextEdit freezes)."""
+        if not new_paths:
+            return
+        if len(new_paths) == 1:
+            self.log_info(f"Queued: {os.path.basename(new_paths[0])}")
+            return
+        n = len(new_paths)
+        sample = ", ".join(os.path.basename(p) for p in new_paths[:3])
+        if n > 3:
+            sample += f", … (+{n - 3} more)"
+        self.log_info(f"Queued {n} videos ({sample}).")
+
     def log_video_queue_summary(self, pending_paths: list, current_path: str) -> None:
         """Log how many videos are waiting and a short queue summary (folder listener tabs)."""
         n_pending = len(pending_paths)

@@ -363,6 +363,7 @@ class CrossDayTab(QWidget):
             self.progress_panel.log_warning(f"Could not read input folder: {e}")
             return
 
+        newly_queued: list[str] = []
         for name in entries:
             file_path = os.path.join(folder, name)
             if not os.path.isfile(file_path):
@@ -383,7 +384,10 @@ class CrossDayTab(QWidget):
                 continue
             self._size_probe.pop(file_path, None)
             self._pending_videos.append(file_path)
-            self.progress_panel.log_info(f"Queued: {os.path.basename(file_path)}")
+            newly_queued.append(file_path)
+
+        if newly_queued:
+            self.progress_panel.log_batched_queued_videos(newly_queued)
             self.progress_panel.log_video_queue_summary(
                 self._pending_videos, self._current_video
             )
