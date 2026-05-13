@@ -48,6 +48,21 @@ if getattr(sys, "frozen", False):
 else:
     sys.path.insert(0, str(project_root))
 
+
+def _load_env() -> None:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+
+    load_dotenv()
+    load_dotenv(project_root / ".env", override=False)
+    if getattr(sys, "frozen", False):
+        load_dotenv(Path(sys.executable).resolve().parent / ".env", override=False)
+
+
+_load_env()
+
 # Version string for About / updater (reads app/__init__.py from overlay when patched)
 from app import __version__
 

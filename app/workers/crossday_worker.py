@@ -281,6 +281,8 @@ class CrossDayAnalyzerWithCallbacks:
         T_OUTLIER = 0.6
         VISITOR_UPGRADE_DAYS = int(crossday_cfg.get("visitor_upgrade_days", 3))
         T_MATCH_STUDENT = float(crossday_cfg.get("t_match_student", 0.40))
+        T_RETURNING_MERGE = float(crossday_cfg.get("t_returning_merge", 0.62))
+        T_TRACK_CONFLICT = float(crossday_cfg.get("t_track_conflict", 0.50))
 
         def runtime_roots():
             roots = []
@@ -313,17 +315,25 @@ class CrossDayAnalyzerWithCallbacks:
             return ""
 
         student_db_path = str(crossday_cfg.get("student_db_path", "") or "").strip()
+        configured_student_db = student_db_path
         if student_db_path and not Path(student_db_path).exists():
             self._log(f"Configured student DB path not found: {student_db_path}", "warning")
             student_db_path = ""
-        if not student_db_path:
+            configured_student_db = ""
+        sync_student_enrollments_enabled = bool(crossday_cfg.get("sync_student_enrollments", True))
+        student_sync_path = None
+        if sync_student_enrollments_enabled:
+            if configured_student_db and configured_student_db.lower().endswith(".db"):
+                student_sync_path = Path(configured_student_db)
+            elif not configured_student_db:
+                from app.student_embeddings_sync import default_enrollments_db_path
+                student_sync_path = default_enrollments_db_path(roots)
+        if not student_db_path and not sync_student_enrollments_enabled:
             auto_candidates = []
             for root in roots:
                 auto_candidates.extend([
-                    # ETL-generated SQLite (preferred — always up to date from BQ+S3)
                     root / "student_enrollments.db",
                     root / "Models" / "student_enrollments.db",
-                    # Legacy pickle formats
                     root / "pliswork_4batch_master_db.pkl",
                     root / "4batches_student_embeddings.pkl",
                     root / "Models" / "pliswork_4batch_master_db.pkl",
@@ -459,6 +469,16 @@ class CrossDayAnalyzerWithCallbacks:
             except Exception as e:
                 self._log(f"Face model failed ({e}), using simplified mode.", "warning")
                 face_app = None
+        if student_sync_path is not None:
+            self._progress(10, "Syncing student roster…")
+            from app.student_embeddings_sync import sync_student_enrollments
+            usable_face_app = face_app if face_app not in (None, "pending") else None
+            sync_student_enrollments(
+                student_sync_path,
+                face_app=usable_face_app,
+                log=self._log,
+                session_once=True,
+            )
         self._progress(10, "Face pipeline ready")
 
         # Optional OCR model for camera timestamp extraction.
@@ -576,6 +596,24 @@ class CrossDayAnalyzerWithCallbacks:
                     next_nf_id = max(next_nf_id, int(s.split("_")[-1]) + 1)
             except ValueError:
                 pass
+
+        if not student_db_path:
+            if student_sync_path is not None and student_sync_path.exists():
+                student_db_path = str(student_sync_path)
+            else:
+                auto_candidates = []
+                for root in roots:
+                    auto_candidates.extend([
+                        root / "student_enrollments.db",
+                        root / "Models" / "student_enrollments.db",
+                        root / "pliswork_4batch_master_db.pkl",
+                        root / "4batches_student_embeddings.pkl",
+                        root / "Models" / "pliswork_4batch_master_db.pkl",
+                        root / "Models" / "4batches_student_embeddings.pkl",
+                        root / "app" / "Models" / "pliswork_4batch_master_db.pkl",
+                        root / "app" / "Models" / "4batches_student_embeddings.pkl",
+                    ])
+                student_db_path = resolve_existing_file(auto_candidates)
 
         if student_db_path:
             if os.path.exists(student_db_path):
@@ -712,7 +750,67 @@ class CrossDayAnalyzerWithCallbacks:
                         min_center_dist = dist
                         best_match_id = t_id
             return best_match_id
-        
+
+        def _note_identity_similarity(g_id, sim) -> None:
+            if g_id is None:
+                return
+            try:
+                sim_f = float(sim)
+            except (TypeError, ValueError):
+                return
+            if sim_f <= 0.0:
+                return
+            slot = global_gallery.setdefault(g_id, {})
+            prev = float(slot.get("peak_identity_sim") or 0.0)
+            slot["peak_identity_sim"] = max(prev, sim_f)
+
+        def _embedding_cohesion_confidence(embeddings) -> float:
+            if not embeddings:
+                return 0.0
+            vectors = []
+            for emb in embeddings:
+                arr = np.asarray(emb, dtype=np.float32).reshape(-1)
+                norm = np.linalg.norm(arr)
+                if norm <= 0:
+                    continue
+                vectors.append(arr / norm)
+            if not vectors:
+                return 0.0
+            if len(vectors) == 1:
+                return 0.0
+            centroid = np.mean(vectors, axis=0)
+            centroid_norm = np.linalg.norm(centroid)
+            if centroid_norm <= 0:
+                return 0.0
+            centroid = centroid / centroid_norm
+            sims = [1 - cosine(vec, centroid) for vec in vectors]
+            return float(np.clip(np.mean(sims), 0.0, 1.0))
+
+        def _collect_identity_embeddings(g_id, g_data) -> list:
+            embs = list(g_data.get("exemplars") or [])
+            for t_data in track_vault.values():
+                if str(t_data.get("global_id")) == str(g_id):
+                    embs.extend(t_data.get("embeddings") or [])
+            return embs
+
+        def finalize_confidence_scores() -> None:
+            for g_id, g_data in global_gallery.items():
+                if g_data.get("engagement_id") is not None:
+                    g_data["confidence"] = float(
+                        g_data.get("confidence")
+                        or g_data.get("peak_student_sim")
+                        or 0.0
+                    )
+                    continue
+
+                embs = _collect_identity_embeddings(g_id, g_data)
+                cohesion = _embedding_cohesion_confidence(embs)
+                peak_identity = float(g_data.get("peak_identity_sim") or 0.0)
+                peak_student = float(g_data.get("peak_student_sim") or 0.0)
+                g_data["confidence"] = float(
+                    np.clip(max(peak_student, peak_identity, cohesion), 0.0, 1.0)
+                )
+
         def find_match_with_margin(track_emb, active_gids):
             scores = []
             for g_id, data in global_gallery.items():
@@ -740,6 +838,62 @@ class CrossDayAnalyzerWithCallbacks:
             if best_sim > T_STRICT_MERGE:
                 return best_id, best_sim
             return None, best_sim
+
+        gid_claim_centroids: dict[str, dict[int, np.ndarray]] = {}
+
+        def _claim_gid(g_id, t_id, track_centroid) -> None:
+            if g_id is None:
+                return
+            gid_claim_centroids.setdefault(str(g_id), {})[int(t_id)] = np.asarray(
+                track_centroid, dtype=np.float32
+            ).reshape(-1)
+
+        def _gid_claim_conflict(g_id, t_id, track_centroid) -> bool:
+            claims = gid_claim_centroids.get(str(g_id), {})
+            if not claims:
+                return False
+            centroid = np.asarray(track_centroid, dtype=np.float32).reshape(-1)
+            norm = np.linalg.norm(centroid)
+            if norm <= 0:
+                return False
+            centroid = centroid / norm
+            for other_tid, other_cent in claims.items():
+                if int(other_tid) == int(t_id):
+                    continue
+                other = np.asarray(other_cent, dtype=np.float32).reshape(-1)
+                other_norm = np.linalg.norm(other)
+                if other_norm <= 0:
+                    continue
+                other = other / other_norm
+                if (1 - cosine(centroid, other)) < T_TRACK_CONFLICT:
+                    return True
+            return False
+
+        def _accept_gallery_match(g_id, track_centroid, t_id, best_sim) -> bool:
+            if not g_id or best_sim <= T_STRICT_MERGE:
+                return False
+            if _gid_claim_conflict(g_id, t_id, track_centroid):
+                return False
+            if RUN_MODE == "EVAL_DAY" and str(g_id).startswith("G_"):
+                attendance = (global_gallery.get(g_id) or {}).get("attendance") or {}
+                prior_days = [
+                    d for d in attendance
+                    if d and d < session_attendance_date
+                ]
+                if prior_days and session_attendance_date not in attendance and best_sim < T_RETURNING_MERGE:
+                    return False
+            return True
+
+        def _match_track_to_gallery(track_centroid, active_gids, t_id):
+            best_id, best_sim = find_match_with_margin(track_centroid, active_gids)
+            if best_id and not _accept_gallery_match(best_id, track_centroid, t_id, best_sim):
+                self._log(
+                    f"Rejected gallery match {best_id} for track {t_id} "
+                    f"(sim={best_sim:.3f}; different person or weak returning match).",
+                    "warning",
+                )
+                return None, best_sim
+            return best_id, best_sim
         
         # Calendar day for attendance keys: OCR overlay when available, else config current_date.
         session_attendance_date = CURRENT_DATE
@@ -791,7 +945,6 @@ class CrossDayAnalyzerWithCallbacks:
             for g_id, g_data in global_gallery.items():
                 g_data["engagement_id"] = None
                 g_data["batch"] = None
-                g_data["confidence"] = 0.0
                 exemplars = g_data.get("exemplars") or []
                 if not exemplars:
                     continue
@@ -807,6 +960,8 @@ class CrossDayAnalyzerWithCallbacks:
                             if sim > best_sim:
                                 best_sim = sim
                                 best_eng_id = eng_id
+                if best_eng_id is not None and best_sim >= 0.0:
+                    g_data["peak_student_sim"] = float(best_sim)
                 if best_eng_id is not None and best_sim > T_MATCH_STUDENT:
                     g_data["engagement_id"] = best_eng_id
                     g_data["batch"] = (student_db.get(best_eng_id) or {}).get("batch")
@@ -1014,8 +1169,8 @@ class CrossDayAnalyzerWithCallbacks:
                     if _is_nf_id(cur_gid) and len(t_data["embeddings"]) >= MIN_EMBEDS_FOR_MATCH:
                         track_centroid = np.mean(t_data["embeddings"], axis=0)
                         track_centroid = track_centroid / np.linalg.norm(track_centroid)
-                        best_id, best_sim = find_match_with_margin(
-                            track_centroid, active_gids_in_frame
+                        best_id, best_sim = _match_track_to_gallery(
+                            track_centroid, active_gids_in_frame, t_id
                         )
                         nf_data = global_gallery.pop(cur_gid, {})
                         nf_att = nf_data.get("attendance", {})
@@ -1036,6 +1191,8 @@ class CrossDayAnalyzerWithCallbacks:
                             active_gids_in_frame.add(best_id)
                             log_attendance(best_id, timestamp)
                             update_exemplars(best_id, track_centroid)
+                            _note_identity_similarity(best_id, best_sim)
+                            _claim_gid(best_id, t_id, track_centroid)
                         elif best_sim < T_NEW_ID or RUN_MODE == "EVAL_DAY":
                             new_gid = f"G_{next_global_id:03d}"
                             next_global_id += 1
@@ -1043,12 +1200,14 @@ class CrossDayAnalyzerWithCallbacks:
                                 "exemplars": [track_centroid],
                                 "attendance": dict(nf_att),
                                 "join_date": nf_data.get("join_date", session_attendance_date),
+                                "peak_identity_sim": float(max(0.0, best_sim)),
                             }
                             t_data["global_id"] = new_gid
                             if cur_gid in active_gids_in_frame:
                                 active_gids_in_frame.discard(cur_gid)
                             active_gids_in_frame.add(new_gid)
                             log_attendance(new_gid, timestamp)
+                            _claim_gid(new_gid, t_id, track_centroid)
                         else:
                             # Gray zone: never keep NF_* if we already have face embeddings — mint G_* instead
                             if len(t_data["embeddings"]) >= MIN_EMBEDS_FOR_MATCH:
@@ -1058,12 +1217,14 @@ class CrossDayAnalyzerWithCallbacks:
                                     "exemplars": [track_centroid],
                                     "attendance": dict(nf_att),
                                     "join_date": nf_data.get("join_date", session_attendance_date),
+                                    "peak_identity_sim": float(max(0.0, best_sim)),
                                 }
                                 t_data["global_id"] = new_gid
                                 if cur_gid in active_gids_in_frame:
                                     active_gids_in_frame.discard(cur_gid)
                                 active_gids_in_frame.add(new_gid)
                                 log_attendance(new_gid, timestamp)
+                                _claim_gid(new_gid, t_id, track_centroid)
                             else:
                                 global_gallery[cur_gid] = nf_data
                     # Body-only: one NF_* per continuous BoT-SORT track (stable while track_id lives)
@@ -1095,11 +1256,15 @@ class CrossDayAnalyzerWithCallbacks:
                     if t_data["global_id"] is None and len(t_data["embeddings"]) >= MIN_EMBEDS_FOR_MATCH:
                         track_centroid = np.mean(t_data["embeddings"], axis=0)
                         track_centroid = track_centroid / np.linalg.norm(track_centroid)
-                        best_id, best_sim = find_match_with_margin(track_centroid, active_gids_in_frame)
+                        best_id, best_sim = _match_track_to_gallery(
+                            track_centroid, active_gids_in_frame, t_id
+                        )
                         if best_id:
                             t_data["global_id"] = best_id
                             active_gids_in_frame.add(best_id)
                             log_attendance(best_id, timestamp)
+                            _note_identity_similarity(best_id, best_sim)
+                            _claim_gid(best_id, t_id, track_centroid)
                         elif best_sim < T_NEW_ID or RUN_MODE == "EVAL_DAY":
                             # In EVAL_DAY mode, always create a new visitor when no confident
                             # match is found. T_NEW_ID only guards against duplicates in
@@ -1108,10 +1273,14 @@ class CrossDayAnalyzerWithCallbacks:
                             # track permanently unidentified (resulting in 0 detections).
                             new_gid = f"G_{next_global_id:03d}"
                             next_global_id += 1
-                            global_gallery[new_gid] = {"exemplars": [track_centroid]}
+                            global_gallery[new_gid] = {
+                                "exemplars": [track_centroid],
+                                "peak_identity_sim": float(max(0.0, best_sim)),
+                            }
                             t_data["global_id"] = new_gid
                             active_gids_in_frame.add(new_gid)
                             log_attendance(new_gid, timestamp)
+                            _claim_gid(new_gid, t_id, track_centroid)
                         if t_data["global_id"]:
                             old_path = f"{crops_dir}/track_{t_id}.jpg"
                             new_path = f"{verification_dir}/{t_data['global_id']}_track_{t_id}.jpg"
@@ -1220,18 +1389,9 @@ class CrossDayAnalyzerWithCallbacks:
             track_centroid = np.mean(embs, axis=0)
             track_centroid = track_centroid / np.linalg.norm(track_centroid)
 
-            # Search against ALL gallery entries (active_gids guard removed — video is done)
-            best_id, best_sim = None, 0.0
-            for g_id, data in global_gallery.items():
-                ex_list = data.get("exemplars") or []
-                if not ex_list:
-                    continue
-                sim = max(1 - cosine(track_centroid, ex) for ex in ex_list)
-                if sim > best_sim:
-                    best_sim = sim
-                    best_id = g_id
+            best_id, best_sim = _match_track_to_gallery(track_centroid, set(), t_id)
 
-            if best_id and best_sim > T_STRICT_MERGE:
+            if best_id:
                 # Remove old NF_ slot if present
                 if cur_gid and _is_nf_id(cur_gid):
                     nf_att = global_gallery.pop(cur_gid, {}).get("attendance", {})
@@ -1247,6 +1407,8 @@ class CrossDayAnalyzerWithCallbacks:
                                 ex["exit"] = slot["exit"]
                 t_data["global_id"] = best_id
                 update_exemplars(best_id, track_centroid)
+                _note_identity_similarity(best_id, best_sim)
+                _claim_gid(best_id, t_id, track_centroid)
                 ids_seen_this_video.add(str(best_id))
                 self._log(f"  Post-resolve: track {t_id} → {best_id} (sim={best_sim:.3f})", "info")
                 resolved_post += 1
@@ -1262,8 +1424,10 @@ class CrossDayAnalyzerWithCallbacks:
                         session_attendance_date: {"entry": first_seen, "exit": last_seen}
                     },
                     "join_date": session_attendance_date,
+                    "peak_identity_sim": float(max(0.0, best_sim)),
                 }
                 t_data["global_id"] = new_gid
+                _claim_gid(new_gid, t_id, track_centroid)
                 ids_seen_this_video.add(str(new_gid))
                 self._log(f"  Post-resolve: track {t_id} → new {new_gid} (no match, sim={best_sim:.3f})", "info")
                 resolved_post += 1
@@ -1305,10 +1469,14 @@ class CrossDayAnalyzerWithCallbacks:
                             if sim > best_sim:
                                 best_sim = sim
                                 best_eng_id = eng_id
+                if best_eng_id is not None and best_sim >= 0.0:
+                    prev_peak = float(g_data.get("peak_student_sim") or 0.0)
+                    g_data["peak_student_sim"] = max(prev_peak, float(best_sim))
                 if best_eng_id and best_sim > T_MATCH_STUDENT:
                     g_data["engagement_id"] = best_eng_id
                     g_data["batch"] = (student_db.get(best_eng_id) or {}).get("batch")
                     g_data["confidence"] = float(best_sim)
+                    g_data["peak_student_sim"] = float(best_sim)
                     self._log(
                         f"  BG student match: {cur_gid} → {best_eng_id} (sim={best_sim:.3f})",
                         "info"
@@ -1319,6 +1487,7 @@ class CrossDayAnalyzerWithCallbacks:
 
         # Enrolled student mapping before summary/reporting.
         map_identities_to_students()
+        finalize_confidence_scores()
 
         # Visitor upgrade
         self._log("Checking for visitor upgrades...")
@@ -1453,15 +1622,11 @@ class CrossDayAnalyzerWithCallbacks:
                 return True
             return False
         
-        classroom_name = str(self.config.get("classroom_name") or "").strip() or "Unknown"
-        # Per the improvement spec: session_date MUST come from OCR. When OCR
-        # didn't parse one, write null (never the configured current_date).
         report_session_date = None if ocr_date_missing else session_attendance_date
         report = {
             "Session": {
                 "date": report_session_date,
                 "date_source": "ocr" if session_date_set_from_ocr else "missing",
-                "classroom": classroom_name,
                 "camera": "Cam_01",
                 "source_video": os.path.basename(self.video_path),
                 "source_video_path": os.path.abspath(self.video_path),
@@ -1547,7 +1712,7 @@ class CrossDayAnalyzerWithCallbacks:
                 "entry": entry_time,
                 "exit": exit_time,
                 "duration_sec": duration,
-                "confidence_score": g_data.get("confidence", 0.0),
+                "confidence_score": round(float(g_data.get("confidence", 0.0) or 0.0), 4),
                 "visit_days_count": len(attendance),
                 "last_present_date": last_present_dt,
                 "present_last_7_days": present_last_7,

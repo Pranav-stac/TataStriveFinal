@@ -431,8 +431,6 @@ class CrossDayTab(QWidget):
         inference_cfg = self.config.get_section("inference") or {}
         worker_config["inference"] = inference_cfg
         worker_config["crossday"] = crossday_config
-        # Shared ClassRoom Name (set in Settings) — written into every attendance report.
-        worker_config["classroom_name"] = self.config.get("general.classroom_name", "")
 
         db_path = self._runtime_db_path if self._runtime_db_path else self.db_picker.get_path().strip()
 

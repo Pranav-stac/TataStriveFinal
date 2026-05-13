@@ -80,6 +80,25 @@ def _date_only_string_field(value: Any) -> Optional[str]:
     return s or None
 
 
+def _json_safe_value(value: Any) -> Any:
+    """Convert row values to types BigQuery streaming JSON accepts."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(v) for v in value]
+    return value
+
+
+def _json_safe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [{k: _json_safe_value(v) for k, v in row.items()} for row in rows]
+
+
 def _is_reportable_attendance_id(pid: Any) -> bool:
     """Per spec: only G_* and NF_* IDs are stored in attendance records.
 
@@ -740,7 +759,7 @@ class BigQuerySyncService:
             "video_id":              _derive_video_id(video_path),
             "video_path":            video_path,
             "classroom":             data.get("classroom"),
-            "recording_date_str":    data.get("recording_date"),
+            "recording_date_str":    _date_only_string_field(data.get("recording_date")),
             "baseline_max_students": data.get("baseline_max_students"),
             "report_type":           data.get("report_type"),
             "report_file":           fname,
@@ -828,8 +847,9 @@ class BigQuerySyncService:
             return
         client = self._get_client()
         full_table = f"{self._project_id}.{DATASET_ID}.{table_name}"
+        payload = _json_safe_rows(rows)
         try:
-            errors = client.insert_rows_json(full_table, rows)
+            errors = client.insert_rows_json(full_table, payload)
             if errors:
                 err_msgs = [str(e) for e in errors]
                 raise RuntimeError(f"BigQuery insert errors for {table_name}: {err_msgs}")
@@ -857,6 +877,7 @@ class BigQuerySyncService:
         videos_in_queue: Optional[int] = None,
     ) -> None:
         try:
+            queue_depth = 0 if videos_in_queue is None else max(0, int(videos_in_queue))
             row = {
                 "center_id":     self.center_id,
                 "sync_ts":       self._now_ts(),
@@ -865,7 +886,7 @@ class BigQuerySyncService:
                 "rows_inserted": rows,
                 "status":        status,
                 "error_msg":     error_msg,
-                "videos_in_queue": videos_in_queue,
+                "videos_in_queue": queue_depth,
             }
             self._insert_rows(SYNC_LOG_TABLE, [row])
         except Exception as e:
