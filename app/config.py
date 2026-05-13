@@ -39,6 +39,7 @@ class ConfigManager:
             "max_time_gap": 600,
             "max_pixel_dist": 200,
             "delete_video_after_processing": False,
+            "save_output_video": False,
             # Tracks probe-interval default migrations; bump when the default changes.
             "probe_interval_defaults_revision": 1,
             # Overlay OCR for recording datetime on engagement reports (same ROI as crossday).

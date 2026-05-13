@@ -827,8 +827,6 @@ class CrossDayAnalyzerWithCallbacks:
             self._log("Using cv2.imshow preview (faster than PyQt)", "info")
         last_valid_timestamp = "00:00:00"
         _last_emit_pct = -1
-        _last_ocr_parsed_log: Tuple[Any, Any] = (None, None)
-        _logged_first_nonempty_ocr_raw = False
         session_date_set_from_ocr = False
         executor = ThreadPoolExecutor(max_workers=2)
         try:
@@ -867,21 +865,6 @@ class CrossDayAnalyzerWithCallbacks:
                     ocr_d, ocr_t, ocr_raw = read_ocr_overlay_frame(
                         frame, ocr_reader, timestamp_coords
                     )
-                    raw_s = (ocr_raw or "").strip()
-                    pair = (ocr_d, ocr_t)
-                    if raw_s or ocr_d or ocr_t:
-                        ocr_log_this = (
-                            pair != _last_ocr_parsed_log
-                            or (raw_s and not _logged_first_nonempty_ocr_raw)
-                        )
-                        if ocr_log_this:
-                            _last_ocr_parsed_log = pair
-                            if raw_s:
-                                _logged_first_nonempty_ocr_raw = True
-                            self._log(
-                                f"OCR @frame {frame_idx}: raw={raw_s[:220]!r} → parsed date={ocr_d!r} time={ocr_t!r}",
-                                "info",
-                            )
                     if ocr_t:
                         last_valid_timestamp = ocr_t
                     if ocr_d:

@@ -675,7 +675,7 @@ class BigQuerySyncService:
         base = {
             "center_id":          self.center_id,
             "sync_timestamp":     ts,
-            "report_date":        rdate,
+            "report_date":        _date_only_string_field(rdate),
             "session_date":       _date_only_string_field(session.get("date")),
             "classroom":          session.get("classroom"),
             "camera":             session.get("camera"),
@@ -736,7 +736,7 @@ class BigQuerySyncService:
         return {
             "center_id":             self.center_id,
             "sync_timestamp":        ts,
-            "report_date":           rdate,
+            "report_date":           _date_only_string_field(rdate),
             "video_id":              _derive_video_id(video_path),
             "video_path":            video_path,
             "classroom":             data.get("classroom"),

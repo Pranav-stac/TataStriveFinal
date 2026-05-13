@@ -438,16 +438,6 @@ class FaceEngagementAnalyzerWithCallbacks:
             def generate_management_summary(*args, **kwargs):
                 return None
         try:
-            from classroom_analysis.ocr_overlay import (
-                apply_ocr_datetime_to_metadata,
-                read_ocr_overlay_frame,
-            )
-        except ImportError:
-            def read_ocr_overlay_frame(*args, **kwargs):
-                return None, None, ""
-            def apply_ocr_datetime_to_metadata(*args, **kwargs):
-                return False
-        try:
             from classroom_analysis.model_weights import (
                 model_weight_candidates,
                 resolve_model_weight,
@@ -544,45 +534,9 @@ class FaceEngagementAnalyzerWithCallbacks:
         ret, first_frame = cap.read()
         if ret and first_frame is not None and isinstance(first_frame, np.ndarray) and first_frame.size > 0:
             video_metadata = extract_camera_metadata_vlm(first_frame)
-            self._log(f"Classroom: {video_metadata['classroom']}", "success")
         else:
             video_metadata = {"classroom": "Unknown", "base_datetime": None, "base_datetime_str": "Unknown"}
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-        enable_ocr_timestamp = bool(self.config.get("enable_ocr_timestamp", True))
-        timestamp_coords = self.config.get("timestamp_coords", [0, 15, 600, 90])
-        if not isinstance(timestamp_coords, (list, tuple)) or len(timestamp_coords) != 4:
-            timestamp_coords = [0, 15, 600, 90]
-        try:
-            timestamp_coords = tuple(int(v) for v in timestamp_coords)
-        except (TypeError, ValueError):
-            timestamp_coords = (0, 15, 600, 90)
-
-        if enable_ocr_timestamp and ret and first_frame is not None:
-            try:
-                import easyocr
-                easyocr_dir = os.path.join(weights_dir, "easyocr")
-                os.makedirs(easyocr_dir, exist_ok=True)
-                ocr_reader = easyocr.Reader(
-                    ['en'],
-                    gpu=False,
-                    model_storage_directory=easyocr_dir,
-                )
-                ocr_d, ocr_t, ocr_raw = read_ocr_overlay_frame(
-                    first_frame, ocr_reader, timestamp_coords
-                )
-                if apply_ocr_datetime_to_metadata(video_metadata, ocr_d, ocr_t):
-                    self._log(
-                        f"OCR recording datetime (applied): {video_metadata['base_datetime_str']}",
-                        "success",
-                    )
-                elif ocr_raw:
-                    self._log(
-                        f"OCR overlay read but date/time incomplete: {ocr_raw[:220]!r}",
-                        "warning",
-                    )
-            except Exception as ocr_err:
-                self._log(f"OCR metadata unavailable ({ocr_err})", "warning")
 
         # Apply configured fallback when VLM returned no classroom — keeps the
         # ClassRoom Name consistent across runs even when the VLM is unavailable.
@@ -592,7 +546,11 @@ class FaceEngagementAnalyzerWithCallbacks:
             or str(video_metadata["classroom"]).strip().lower() in {"", "unknown", "none"}
         ) and classroom_fallback:
             video_metadata["classroom"] = classroom_fallback
-            self._log(f"Classroom (fallback): {classroom_fallback}", "info")
+        recording_label = video_metadata.get("base_datetime_str") or "Unknown"
+        self._log(
+            f"Classroom: {video_metadata['classroom']} | Recording: {recording_label}",
+            "success",
+        )
         
         # Sampling config from GUI (defaults match original)
         PROBE_DURATION_SEC = self.config.get("probe_duration", 300)
@@ -607,6 +565,60 @@ class FaceEngagementAnalyzerWithCallbacks:
         while curr < self.total_frames:
             start_frames.append(curr)
             curr += interval_frames
+
+        save_output_video = bool(self.config.get("save_output_video", False))
+        out = None
+        output_video_path = None
+        if save_output_video:
+            output_video_path = os.path.join(self.output_dir, "engagement_annotated_output.mp4")
+            out = cv2.VideoWriter(
+                output_video_path,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                self.fps,
+                (self.width, self.height),
+            )
+            if not out.isOpened():
+                output_video_path = os.path.join(self.output_dir, "engagement_annotated_output.avi")
+                out = cv2.VideoWriter(
+                    output_video_path,
+                    cv2.VideoWriter_fourcc(*"MJPG"),
+                    self.fps,
+                    (self.width, self.height),
+                )
+            if out.isOpened():
+                self._log(f"Output video: {output_video_path}", "info")
+            else:
+                out = None
+                self._log("VideoWriter failed. Output video disabled.", "warning")
+        else:
+            self._log("Output video disabled (report only)", "info")
+
+        def annotate_engagement_frame(frame, tracked_bodies):
+            annotated = frame.copy()
+            for body in tracked_bodies:
+                x1, y1, x2, y2 = [int(v) for v in body["bbox"]]
+                pid = body["id"]
+                activity = body.get("activity", "")
+                state = body.get("state", "")
+                color = (
+                    (0, 255, 0)
+                    if state == "engaged"
+                    else (0, 165, 255)
+                    if state == "partially_engaged"
+                    else (0, 0, 255)
+                )
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                label = f"ID:{pid}" + (f" {activity}" if activity else "")
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x1, y1 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    1,
+                )
+            return annotated
             
         # Tracker init (fp16 only on CUDA - CPU lacks half-precision conv support)
         tracker = None
@@ -843,20 +855,14 @@ class FaceEngagementAnalyzerWithCallbacks:
                                     body['activity'] = 'detected'
                                     body['state'] = ''
                     
+                    if save_output_video and out is not None and frames_processed % FRAME_SKIP == 0:
+                        out.write(annotate_engagement_frame(frame, tracked_bodies))
+
                     # Draw annotations and send frame for real-time preview.
                     # Throttle to every Nth frame to reduce Qt event-loop pressure
                     # and avoid UI freezes on weaker hardware.
                     if self.frame_callback and (frames_processed % PREVIEW_EVERY_N_FRAMES == 0):
-                        preview_frame = frame.copy()
-                        for body in tracked_bodies:
-                            x1, y1, x2, y2 = [int(v) for v in body['bbox']]
-                            pid = body['id']
-                            activity = body.get('activity', '')
-                            state = body.get('state', '')
-                            color = (0, 255, 0) if state == 'engaged' else (0, 165, 255) if state == 'partially_engaged' else (0, 0, 255)
-                            cv2.rectangle(preview_frame, (x1, y1), (x2, y2), color, 2)
-                            label = f"ID:{pid}" + (f" {activity}" if activity else "")
-                            cv2.putText(preview_frame, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                        preview_frame = annotate_engagement_frame(frame, tracked_bodies)
                         # Resize and convert to RGB in worker thread for responsive UI
                         h, w = preview_frame.shape[:2]
                         if w > 480:
@@ -874,6 +880,10 @@ class FaceEngagementAnalyzerWithCallbacks:
             })
         
         cap.release()
+        if out is not None:
+            out.release()
+            if output_video_path:
+                self._log(f"Output video: {output_video_path}", "success")
         
         if self._should_stop():
             return ""

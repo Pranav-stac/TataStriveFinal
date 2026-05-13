@@ -47,8 +47,22 @@ class SettingsDialog(QDialog):
         self.delete_crossday_checkbox.setToolTip(
             "When enabled, the source video file is removed after a successful attendance run."
         )
+        self.save_classroom_video_checkbox = QCheckBox(
+            "Save annotated output video (engagement analysis)"
+        )
+        self.save_classroom_video_checkbox.setToolTip(
+            "When enabled, engagement runs write an annotated video in the output folder."
+        )
+        self.save_crossday_video_checkbox = QCheckBox(
+            "Save annotated output video (attendance analysis)"
+        )
+        self.save_crossday_video_checkbox.setToolTip(
+            "When enabled, attendance runs write an annotated video in the output folder."
+        )
         processing_form.addWidget(self.delete_classroom_checkbox)
         processing_form.addWidget(self.delete_crossday_checkbox)
+        processing_form.addWidget(self.save_classroom_video_checkbox)
+        processing_form.addWidget(self.save_crossday_video_checkbox)
         layout.addWidget(processing_group)
 
         button_layout = QHBoxLayout()
@@ -73,6 +87,12 @@ class SettingsDialog(QDialog):
         self.delete_crossday_checkbox.setChecked(
             self.config.get("crossday.delete_video_after_processing", False)
         )
+        self.save_classroom_video_checkbox.setChecked(
+            self.config.get("classroom.save_output_video", False)
+        )
+        self.save_crossday_video_checkbox.setChecked(
+            self.config.get("crossday.save_output_video", True)
+        )
 
     def _save_and_accept(self):
         self.config.set("preview_enabled", self.preview_checkbox.isChecked(), save=False)
@@ -84,6 +104,16 @@ class SettingsDialog(QDialog):
         self.config.set(
             "crossday.delete_video_after_processing",
             self.delete_crossday_checkbox.isChecked(),
+            save=False,
+        )
+        self.config.set(
+            "classroom.save_output_video",
+            self.save_classroom_video_checkbox.isChecked(),
+            save=False,
+        )
+        self.config.set(
+            "crossday.save_output_video",
+            self.save_crossday_video_checkbox.isChecked(),
             save=True,
         )
         self.accept()
