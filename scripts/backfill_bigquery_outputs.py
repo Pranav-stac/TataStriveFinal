@@ -33,6 +33,7 @@ from app.bigquery_sync import (  # noqa: E402
     ATTENDANCE_TABLE,
     DATASET_ID,
     ENGAGEMENT_TABLE,
+    MANAGEMENT_SUMMARY_TABLE,
     PROJECT_ID,
     BigQuerySyncService,
     _creds_path,
@@ -78,6 +79,9 @@ def build_report_plan(svc: BigQuerySyncService, path: Path) -> ReportPlan | None
     elif report_type == "engagement":
         rows = svc._build_engagement_rows(data, str(path))
         table_name = ENGAGEMENT_TABLE
+    elif report_type == "management_summary":
+        rows = svc._build_management_summary_rows(data, str(path))
+        table_name = MANAGEMENT_SUMMARY_TABLE
     else:
         return None
 

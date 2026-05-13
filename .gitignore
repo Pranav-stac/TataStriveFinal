@@ -18,3 +18,4 @@ dist
 bq_summary_output
 docs
 .sqlite
+EXPECTEDOUTPUT

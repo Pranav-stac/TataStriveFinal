@@ -2,7 +2,7 @@
 Attendance Tab.
 UI for running attendance analysis.
 Run mode is auto-detected from the DB file. Session info is derived from the current date.
-All thresholds and options are configured via the main Settings dialog (Ctrl+,).
+Open Settings (Ctrl+,) for preview preferences; analysis defaults are fixed in the app.
 """
 
 import os
@@ -431,6 +431,8 @@ class CrossDayTab(QWidget):
         inference_cfg = self.config.get_section("inference") or {}
         worker_config["inference"] = inference_cfg
         worker_config["crossday"] = crossday_config
+        # Shared ClassRoom Name (set in Settings) — written into every attendance report.
+        worker_config["classroom_name"] = self.config.get("general.classroom_name", "")
 
         db_path = self._runtime_db_path if self._runtime_db_path else self.db_picker.get_path().strip()
 

@@ -8,6 +8,15 @@ Uses the project's env venv (has all dependencies).
 Usage:
     python build_exe.py
     # Or: env\Scripts\python.exe build_exe.py
+
+Distribution requirement:
+    Every Windows machine running the produced .exe needs the
+    "Microsoft Visual C++ 2015-2022 Redistributable (x64)" installed.
+    Bundle vc_redist.x64.exe next to the installer or document the
+    requirement prominently. Without it the app fails with DLL errors
+    (PyTorch / onnxruntime / InsightFace) and attendance produces
+    "ghost NF" entries.
+    Download: https://aka.ms/vs/17/release/vc_redist.x64.exe
 """
 
 import os
@@ -330,6 +339,12 @@ set "PATH=%CD%\\_internal;%CD%;%PATH%"
     print()
     print("Models (yolov8n-face.pt, etc.) are bundled. Detection/pose models")
     print("download automatically on first run.")
+    print()
+    print("IMPORTANT: Every target Windows machine MUST have the Microsoft Visual")
+    print("           C++ 2015-2022 Redistributable (x64) installed before running")
+    print("           the .exe. Otherwise PyTorch / onnxruntime fail to load, and")
+    print("           attendance will produce ghost NF entries.")
+    print("           Download: https://aka.ms/vs/17/release/vc_redist.x64.exe")
 
 
 if __name__ == "__main__":

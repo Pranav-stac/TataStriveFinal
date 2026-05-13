@@ -39,8 +39,28 @@ def _get_probe_end_time(time_str, fallback_minutes=30):
         return "Unknown"
 
 
-def generate_management_summary(input_json_path, output_json_path, probe_duration_sec=1800):
-    """Generate grouped-by-mode management summary from class dynamics report."""
+def generate_management_summary(
+    input_json_path,
+    output_json_path,
+    probe_interval_sec=1800,
+    probe_duration_sec=None,
+):
+    """
+    Generate grouped-by-mode management summary from class dynamics report.
+
+    ``probe_interval_sec`` is the wall-clock cadence between probes (default
+    1800s / 30 min). Time-window end times advance by this value, NOT by the
+    5-minute sample window inside each probe.
+
+    ``probe_duration_sec`` is accepted as a deprecated alias for backwards
+    compatibility with callers that previously passed the sample-window length.
+    """
+    # Backwards compatibility: old callers passed probe_duration_sec meaning the
+    # sampling cadence (1800) rather than the sample window (300). Honour the
+    # value but log only via the parameter alias.
+    if probe_duration_sec is not None:
+        probe_interval_sec = probe_duration_sec
+
     with open(input_json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -50,7 +70,7 @@ def generate_management_summary(input_json_path, output_json_path, probe_duratio
 
     management_sessions = []
     current_session = None
-    fallback_minutes = max(1, int(probe_duration_sec / 60))
+    fallback_minutes = max(1, int(probe_interval_sec / 60))
 
     for probe in probes:
         mode = probe.get("class_mode", "Unknown")

@@ -52,10 +52,16 @@ class CrossDayWorker(QThread):
                 _ = torch.__version__
             except (OSError, ImportError) as torch_err:
                 err_msg = (
-                    "PyTorch failed to load (DLL error). Try installing CPU-only PyTorch:\n\n"
-                    "pip uninstall torch torchvision\n"
-                    "pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu\n\n"
-                    "Or install Microsoft Visual C++ Redistributable 2015-2022 from Microsoft's website."
+                    "PyTorch failed to load (DLL error).\n\n"
+                    "Most common cause on Windows: Microsoft Visual C++ 2015-2022 "
+                    "Redistributable (x64) is missing.\n"
+                    "Download: https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+                    "Install, restart the machine, then relaunch the app.\n\n"
+                    "If the error persists, install CPU-only PyTorch:\n"
+                    "  pip uninstall torch torchvision\n"
+                    "  pip install torch torchvision --index-url "
+                    "https://download.pytorch.org/whl/cpu\n\n"
+                    f"Original error: {torch_err}"
                 )
                 self.error.emit(err_msg)
                 return
@@ -1221,14 +1227,16 @@ class CrossDayAnalyzerWithCallbacks:
                 if out is not None:
                     out.write(frame)
                     frames_written += 1
-                if self.use_cv2_preview and frame_idx % 5 == 0:
+                # Preview every Nth frame keeps the Qt event loop responsive
+                # on lower-end laptops without losing useful visual feedback.
+                if self.use_cv2_preview and frame_idx % 10 == 0:
                     preview_frame = frame.copy()
                     h, w = preview_frame.shape[:2]
                     if w > 640:
                         preview_frame = cv2.resize(preview_frame, (640, int(h * 640 / w)))
                     cv2.imshow(cv2_preview_window, preview_frame)
                     cv2.waitKey(1)
-                elif self.frame_callback and frame_idx % 5 == 0:
+                elif self.frame_callback and frame_idx % 10 == 0:
                     preview_frame = frame.copy()
                     h, w = preview_frame.shape[:2]
                     if w > 480:
@@ -1470,6 +1478,13 @@ class CrossDayAnalyzerWithCallbacks:
         _save_db(save_path)
         self._log(f"Database saved: {save_path}", "success")
 
+        # OCR is the only authoritative source of the Session Date. When OCR is
+        # enabled but never parsed a date, the report's Session.date MUST be null
+        # — we never fall back to the configured current_date for the report.
+        # The internal attendance key (session_attendance_date) keeps using the
+        # placeholder so the DB doesn't lose embeddings, but report-time logic
+        # treats the date as unknown.
+        ocr_date_missing = bool(enable_ocr_timestamp) and not session_date_set_from_ocr
         if enable_ocr_timestamp:
             if session_date_set_from_ocr:
                 self._log(
@@ -1479,9 +1494,10 @@ class CrossDayAnalyzerWithCallbacks:
                 )
             else:
                 self._log(
-                    f"Session date for report: {session_attendance_date} "
-                    f"(configured current_date fallback; OCR never parsed a date). "
-                    f"Settings current_date={CURRENT_DATE!r}.",
+                    "Session date for report: NULL — OCR never parsed a date from the "
+                    "video overlay. Per the improvement spec, system/config dates are "
+                    "NOT substituted. Check the timestamp ROI, video quality, or disable "
+                    "OCR if your camera does not stamp a date.",
                     "warning",
                 )
         
@@ -1497,12 +1513,33 @@ class CrossDayAnalyzerWithCallbacks:
                 return int(td.total_seconds())
             except (ValueError, TypeError):
                 return 0
+
+        # Per the improvement spec: attendance reports must only contain G_* and
+        # NF_* IDs. Legacy DB prefixes (e.g. Day2_V_*, custom visitor codes) from
+        # chained pkl databases are filtered at report time. DB load/save logic
+        # is untouched so historical files still load cleanly.
+        def _is_reportable_id(gid: str) -> bool:
+            s = str(gid or "")
+            if not s:
+                return False
+            if s.startswith("G_"):
+                return True
+            if s.startswith("NF_") or "_NF_" in s:
+                return True
+            return False
         
+        classroom_name = str(self.config.get("classroom_name") or "").strip() or "Unknown"
+        # Per the improvement spec: session_date MUST come from OCR. When OCR
+        # didn't parse one, write null (never the configured current_date).
+        report_session_date = None if ocr_date_missing else session_attendance_date
         report = {
             "Session": {
-                "date": session_attendance_date,
+                "date": report_session_date,
+                "date_source": "ocr" if session_date_set_from_ocr else "missing",
+                "classroom": classroom_name,
                 "camera": "Cam_01",
                 "source_video": os.path.basename(self.video_path),
+                "source_video_path": os.path.abspath(self.video_path),
                 "run_folder": run_folder,
                 "report_people_scope": "this_video_only",
                 "duration": "00:00:00"
@@ -1517,11 +1554,43 @@ class CrossDayAnalyzerWithCallbacks:
             "People": []
         }
         
-        current_dt = datetime.strptime(session_attendance_date, "%Y-%m-%d")
+        try:
+            current_dt = datetime.strptime(session_attendance_date, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            current_dt = None
         latest_exit_time = "00:00:00"
         
+        def _prior_day_stats(attendance_dates, reference_date, reference_dt):
+            """Return (last_present_date, present_last_7_days) for any identity.
+
+            ``attendance_dates``  : keys present in the gallery's attendance dict.
+            ``reference_date``    : YYYY-MM-DD string for "this" session (may be the
+                                    placeholder when OCR didn't supply one — that's OK,
+                                    the placeholder still works as a strict-less-than key).
+            ``reference_dt``      : parsed datetime for reference_date, or None when
+                                    we can't compute a 7-day window (OCR failure).
+            """
+            past = sorted(
+                (d for d in attendance_dates if d and d < reference_date),
+                reverse=True,
+            )
+            last_dt = past[0] if past else None
+            if reference_dt is None:
+                return last_dt, 0
+            count = 0
+            past_set = set(past)
+            for i in range(1, 8):
+                check = (reference_dt - timedelta(days=i)).strftime("%Y-%m-%d")
+                if check in past_set:
+                    count += 1
+            return last_dt, count
+
+        skipped_legacy_ids: list[str] = []
         for g_id, g_data in global_gallery.items():
             if str(g_id) not in ids_seen_this_video:
+                continue
+            if not _is_reportable_id(g_id):
+                skipped_legacy_ids.append(str(g_id))
                 continue
             attendance = g_data.get("attendance", {})
             if session_attendance_date not in attendance:
@@ -1540,6 +1609,11 @@ class CrossDayAnalyzerWithCallbacks:
             has_prior_day_attendance = any(
                 d < session_attendance_date for d in attendance.keys()
             )
+            # Compute prior-day stats for EVERY identity (G_*, NF_*, enrolled_student).
+            # Only first-ever sightings stay null/0.
+            last_present_dt, present_last_7 = _prior_day_stats(
+                attendance.keys(), session_attendance_date, current_dt
+            )
 
             person_dict = {
                 "id": g_id,
@@ -1550,51 +1624,56 @@ class CrossDayAnalyzerWithCallbacks:
                 "duration_sec": duration,
                 "confidence_score": g_data.get("confidence", 0.0),
                 "visit_days_count": len(attendance),
+                "last_present_date": last_present_dt,
+                "present_last_7_days": present_last_7,
             }
-            
+
             if _is_nf_id(g_id):
                 person_dict["type"] = "no_face_track"
-                person_dict["last_present_date"] = None
-                person_dict["present_last_7_days"] = 0
                 report["Counts"]["nf_presence"] += 1
             elif g_data.get("engagement_id") is not None:
                 person_dict["type"] = "enrolled_student"
-                person_dict["last_present_date"] = None
-                person_dict["present_last_7_days"] = 0
                 report["Counts"]["identified_students"] += 1
             elif is_new_walk_in:
                 person_dict["type"] = "visitor"
-                person_dict["last_present_date"] = None
-                person_dict["present_last_7_days"] = 0
                 report["Counts"]["visitors"] += 1
             elif has_prior_day_attendance:
                 person_dict["type"] = "returning_employee"
-                past_dates = [d for d in attendance.keys() if d < session_attendance_date]
-                past_dates.sort(reverse=True)
-                person_dict["last_present_date"] = past_dates[0] if past_dates else None
-                
-                present_last_7 = 0
-                for i in range(1, 8):
-                    check_date = (current_dt - timedelta(days=i)).strftime("%Y-%m-%d")
-                    if check_date in attendance:
-                        present_last_7 += 1
-                person_dict["present_last_7_days"] = present_last_7
-                
                 report["Counts"]["returning"] += 1
             else:
                 person_dict["type"] = "visitor"
-                person_dict["last_present_date"] = None
-                person_dict["present_last_7_days"] = 0
                 report["Counts"]["visitors"] += 1
 
             report["People"].append(person_dict)
         
+        if skipped_legacy_ids:
+            self._log(
+                f"Filtered {len(skipped_legacy_ids)} legacy identity prefix(es) from the "
+                "attendance report (only G_* and NF_* IDs are reportable). "
+                f"First few: {skipped_legacy_ids[:5]}",
+                "info",
+            )
+
         report["Counts"]["unique_people"] = (
             report["Counts"]["returning"] +
             report["Counts"]["visitors"] +
             report["Counts"].get("identified_students", 0)
         )
-        report["Session"]["duration"] = latest_exit_time
+        # Session.duration is the actual video length, not the latest exit clock
+        # time. Compute from total_frames / fps so durations are correct even when
+        # the first detected entry isn't at 00:00:00.
+        try:
+            video_seconds = int(round(total_frames / float(fps))) if fps else 0
+        except (TypeError, ZeroDivisionError):
+            video_seconds = 0
+        if video_seconds > 0:
+            v_h, rem = divmod(video_seconds, 3600)
+            v_m, v_s = divmod(rem, 60)
+            report["Session"]["duration"] = f"{v_h:02d}:{v_m:02d}:{v_s:02d}"
+            report["Session"]["duration_sec"] = video_seconds
+        else:
+            report["Session"]["duration"] = latest_exit_time
+            report["Session"]["duration_sec"] = 0
         
         report_path = os.path.join(self.output_dir, f"{run_folder}_attendance_report.json")
         with open(report_path, 'w') as f:

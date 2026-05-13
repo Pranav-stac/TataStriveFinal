@@ -32,12 +32,19 @@ class ConfigManager:
         },
         "classroom": {
             "probe_duration": 300,
-            "probe_interval": 3600,
+            # One probe every 30 minutes (sample 5 min within each probe).
+            "probe_interval": 1800,
             "frame_skip": 3,
             "similarity_threshold": 0.75,
             "max_time_gap": 600,
             "max_pixel_dist": 200,
-            "delete_video_after_processing": False
+            "delete_video_after_processing": False,
+            # Tracks probe-interval default migrations; bump when the default changes.
+            "probe_interval_defaults_revision": 1,
+        },
+        "general": {
+            # Fallback classroom name when VLM/OCR can't extract one. Stored in every report.
+            "classroom_name": "",
         },
         "crossday": {
             # Face gallery: slightly strict to separate identities; margin only when 2nd is also strong
@@ -103,6 +110,7 @@ class ConfigManager:
                 # Merge with defaults to handle new keys
                 self._config = self._deep_merge(self.DEFAULT_CONFIG.copy(), loaded)
                 self._migrate_crossday_face_defaults()
+                self._migrate_classroom_probe_interval()
                 # Migrate to match unique_and_recognition.py defaults
                 inf = self._config.get("inference") or {}
                 if inf.get("yolo_imgsz") == 416 or inf.get("face_det_size") == 416:
@@ -190,7 +198,29 @@ class ConfigManager:
         cd["face_match_defaults_revision"] = 2
         if changed or old_rev < 2:
             self._save()
-    
+
+    def _migrate_classroom_probe_interval(self) -> None:
+        """
+        Bump legacy 1-hour probe cadence (3600s) to the new 30-minute default (1800s).
+        Only migrates configs that were still on the old default; user-chosen non-3600
+        values are preserved.
+        """
+        cr = self._config.setdefault("classroom", {})
+        try:
+            rev = int(cr.get("probe_interval_defaults_revision", 0))
+        except (TypeError, ValueError):
+            rev = 0
+        if rev >= 1:
+            return
+        try:
+            current = int(cr.get("probe_interval", 0))
+        except (TypeError, ValueError):
+            current = 0
+        if current == 3600:
+            cr["probe_interval"] = 1800
+        cr["probe_interval_defaults_revision"] = 1
+        self._save()
+
     def get(self, key: str, default: Any = None) -> Any:
         """
         Get a configuration value using dot notation.

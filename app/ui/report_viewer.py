@@ -350,7 +350,8 @@ class ReportViewer(QWidget):
         self.data_table.setRowCount(len(people))
         self.data_table.setColumnCount(9)
         self.data_table.setHorizontalHeaderLabels([
-            "ID", "Type", "Engagement ID", "Batch", "Confidence", "Entry", "Exit", "Duration", "Last 7 Days"
+            "ID", "Type", "Engagement ID", "Batch", "Match Confidence",
+            "Entry", "Exit", "Duration", "Last 7 Days"
         ])
         
         for row, person in enumerate(people):

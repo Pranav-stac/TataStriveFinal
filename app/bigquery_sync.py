@@ -2,9 +2,9 @@
 BigQuery Sync Service for TataStrive Analytics.
 
 Handles:
- - Automatic BigQuery table creation (attendance + engagement)
+ - Automatic BigQuery table creation (attendance, engagement probes, management summary)
  - Syncing completed report JSON files to BigQuery
- - Supports both class dynamics and management summary engagement reports
+ - Class dynamics probes and management summary sessions land in separate tables
  - Daily scheduled sync (runs once per day at startup / after analysis)
  - Center-ID isolation: every row carries the device's center_id
 """
@@ -80,6 +80,63 @@ def _date_only_string_field(value: Any) -> Optional[str]:
     return s or None
 
 
+def _is_reportable_attendance_id(pid: Any) -> bool:
+    """Per spec: only G_* and NF_* IDs are stored in attendance records.
+
+    Mirrors the filter in the attendance worker so BigQuery rows can't be
+    polluted by legacy DB prefixes loaded from chained pkl databases.
+    """
+    s = str(pid or "")
+    if not s:
+        return False
+    if s.startswith("G_"):
+        return True
+    if s.startswith("NF_") or "_NF_" in s:
+        return True
+    return False
+
+
+def _derive_video_id(video_path: Any) -> Optional[str]:
+    """Stable video identifier for joining engagement and management summary rows."""
+    if video_path is None:
+        return None
+    s = str(video_path).strip()
+    if not s:
+        return None
+    stem = Path(s).stem
+    return stem or Path(s).name or s
+
+
+def _flatten_activity_distribution(activity: Any) -> Dict[str, Optional[float]]:
+    dist = activity if isinstance(activity, dict) else {}
+    return {
+        "act_listening_pct": dist.get("listening"),
+        "act_writing_pct": dist.get("writing"),
+        "act_raising_hand_pct": dist.get("raising_hand"),
+        "act_unknown_pct": dist.get("unknown"),
+    }
+
+
+def _flatten_attention_distribution(attention: Any) -> Dict[str, Optional[float]]:
+    dist = attention if isinstance(attention, dict) else {}
+    return {
+        "att_focused_pct": dist.get("focused"),
+        "att_partially_focused_pct": dist.get("partially_focused"),
+        "att_distracted_pct": dist.get("distracted"),
+        "att_not_visible_pct": dist.get("not_visible"),
+    }
+
+
+def _flatten_behavior_profile(profile: Any) -> Dict[str, Optional[float]]:
+    dist = profile if isinstance(profile, dict) else {}
+    return {
+        "active_participation_pct": dist.get("active_participation"),
+        "passive_focus_pct": dist.get("passive_focus"),
+        "disengaged_idle_pct": dist.get("disengaged_idle"),
+        "unobservable_pct": dist.get("unobservable"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # BigQuery dataset / table names
 # ---------------------------------------------------------------------------
@@ -87,6 +144,7 @@ PROJECT_ID = "tatastrive-269409"
 DATASET_ID   = "tatastrive_analytics"
 ATTENDANCE_TABLE   = "attendance_reports"
 ENGAGEMENT_TABLE   = "engagement_reports"
+MANAGEMENT_SUMMARY_TABLE = "management_summary_reports"
 SYNC_LOG_TABLE     = "sync_log"
 
 # ---------------------------------------------------------------------------
@@ -100,8 +158,10 @@ ATTENDANCE_SCHEMA = [
     {"name": "report_date",        "type": "DATE",      "mode": "NULLABLE"},
     # Session
     {"name": "session_date",       "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "classroom",          "type": "STRING",    "mode": "NULLABLE"},
     {"name": "camera",             "type": "STRING",    "mode": "NULLABLE"},
     {"name": "source_video",       "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "source_video_path",  "type": "STRING",    "mode": "NULLABLE"},
     {"name": "session_duration",   "type": "STRING",    "mode": "NULLABLE"},
     # Counts
     {"name": "unique_people",      "type": "INTEGER",   "mode": "NULLABLE"},
@@ -130,6 +190,8 @@ ENGAGEMENT_SCHEMA = [
     {"name": "sync_timestamp",       "type": "TIMESTAMP", "mode": "REQUIRED"},
     {"name": "report_date",          "type": "DATE",      "mode": "NULLABLE"},
     # Video / classroom metadata
+    {"name": "video_id",             "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "video_path",           "type": "STRING",    "mode": "NULLABLE"},
     {"name": "classroom",            "type": "STRING",    "mode": "NULLABLE"},
     {"name": "recording_date_str",   "type": "STRING",    "mode": "NULLABLE"},
     {"name": "baseline_max_students","type": "INTEGER",   "mode": "NULLABLE"},
@@ -140,14 +202,45 @@ ENGAGEMENT_SCHEMA = [
     {"name": "chaos_sec",            "type": "FLOAT",     "mode": "NULLABLE"},
     {"name": "break_sec",            "type": "FLOAT",     "mode": "NULLABLE"},
     # Per-probe (one row per probe)
-    {"name": "probe_index",          "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "time_slice",           "type": "STRING",    "mode": "NULLABLE"},
     {"name": "video_timestamp_sec",  "type": "FLOAT",     "mode": "NULLABLE"},
     {"name": "real_world_time",      "type": "STRING",    "mode": "NULLABLE"},
     {"name": "student_count",        "type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "avg_engagement",       "type": "FLOAT",     "mode": "NULLABLE"},
     {"name": "class_mode",           "type": "STRING",    "mode": "NULLABLE"},
-    {"name": "activity_distribution","type": "STRING",    "mode": "NULLABLE"},  # JSON string
-    {"name": "attention_distribution","type": "STRING",   "mode": "NULLABLE"},  # JSON string
+    {"name": "act_listening_pct",    "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "act_writing_pct",      "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "act_raising_hand_pct", "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "act_unknown_pct",      "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "att_focused_pct",      "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "att_partially_focused_pct", "type": "FLOAT", "mode": "NULLABLE"},
+    {"name": "att_distracted_pct",   "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "att_not_visible_pct",  "type": "FLOAT",     "mode": "NULLABLE"},
+    # Source
+    {"name": "report_file",          "type": "STRING",    "mode": "NULLABLE"},
+]
+
+MANAGEMENT_SUMMARY_SCHEMA = [
+    # Partition / identity
+    {"name": "center_id",            "type": "STRING",    "mode": "REQUIRED"},
+    {"name": "sync_timestamp",       "type": "TIMESTAMP", "mode": "REQUIRED"},
+    {"name": "report_date",          "type": "DATE",      "mode": "NULLABLE"},
+    # Video / classroom metadata
+    {"name": "video_id",             "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "video_path",           "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "classroom",            "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "recording_date_str",   "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "baseline_max_students","type": "INTEGER",   "mode": "NULLABLE"},
+    {"name": "report_type",          "type": "STRING",    "mode": "NULLABLE"},
+    # Per-session (one row per grouped mode window)
+    {"name": "session_mode",       "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "time_window",          "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "avg_student_count",    "type": "INTEGER",   "mode": "NULLABLE"},
+    {"name": "overall_engagement_score", "type": "FLOAT", "mode": "NULLABLE"},
+    {"name": "active_participation_pct", "type": "FLOAT", "mode": "NULLABLE"},
+    {"name": "passive_focus_pct",    "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "disengaged_idle_pct",  "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "unobservable_pct",     "type": "FLOAT",     "mode": "NULLABLE"},
     # Source
     {"name": "report_file",          "type": "STRING",    "mode": "NULLABLE"},
 ]
@@ -280,6 +373,7 @@ class BigQuerySyncService:
         for table_name, schema_dicts in [
             (ATTENDANCE_TABLE,  ATTENDANCE_SCHEMA),
             (ENGAGEMENT_TABLE,  ENGAGEMENT_SCHEMA),
+            (MANAGEMENT_SUMMARY_TABLE, MANAGEMENT_SUMMARY_SCHEMA),
             (SYNC_LOG_TABLE,    SYNC_LOG_SCHEMA),
         ]:
             full_table = f"{dataset_ref}.{table_name}"
@@ -289,7 +383,7 @@ class BigQuerySyncService:
             ]
             table = bigquery.Table(full_table, schema=schema)
             # Partition by report_date for attendance/engagement tables
-            if table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE):
+            if table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE, MANAGEMENT_SUMMARY_TABLE):
                 table.time_partitioning = bigquery.TimePartitioning(
                     type_=bigquery.TimePartitioningType.DAY,
                     field="report_date"
@@ -361,7 +455,12 @@ class BigQuerySyncService:
             client = self._get_client()
             location = self._dataset_location(client)
             out: Dict[str, str] = {}
-            for table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE, SYNC_LOG_TABLE):
+            for table_name in (
+                ATTENDANCE_TABLE,
+                ENGAGEMENT_TABLE,
+                MANAGEMENT_SUMMARY_TABLE,
+                SYNC_LOG_TABLE,
+            ):
                 fqtn = f"`{self._project_id}.{DATASET_ID}.{table_name}`"
                 self._run_query(client, f"TRUNCATE TABLE {fqtn}", location)
                 n = self._table_row_count(client, fqtn, location)
@@ -381,7 +480,12 @@ class BigQuerySyncService:
         """
         with self._lock:
             client = self._get_client()
-            for table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE, SYNC_LOG_TABLE):
+            for table_name in (
+                ATTENDANCE_TABLE,
+                ENGAGEMENT_TABLE,
+                MANAGEMENT_SUMMARY_TABLE,
+                SYNC_LOG_TABLE,
+            ):
                 fq = f"{self._project_id}.{DATASET_ID}.{table_name}"
                 client.delete_table(fq, not_found_ok=True)
         self.ensure_tables()
@@ -389,7 +493,12 @@ class BigQuerySyncService:
             client = self._get_client()
             location = self._dataset_location(client)
             out: Dict[str, str] = {}
-            for table_name in (ATTENDANCE_TABLE, ENGAGEMENT_TABLE, SYNC_LOG_TABLE):
+            for table_name in (
+                ATTENDANCE_TABLE,
+                ENGAGEMENT_TABLE,
+                MANAGEMENT_SUMMARY_TABLE,
+                SYNC_LOG_TABLE,
+            ):
                 fqtn = f"`{self._project_id}.{DATASET_ID}.{table_name}`"
                 n = self._table_row_count(client, fqtn, location)
                 out[table_name] = "empty" if n == 0 else f"rows_remain_{n}"
@@ -433,9 +542,11 @@ class BigQuerySyncService:
     # ------------------------------------------------------------------
 
     def detect_report_type(self, report_data: Dict) -> str:
-        """Return 'attendance', 'engagement', or 'unknown'."""
-        if "hourly_probes" in report_data or "sessions" in report_data:
+        """Return attendance, engagement, management_summary, or unknown."""
+        if "hourly_probes" in report_data:
             return "engagement"
+        if "sessions" in report_data:
+            return "management_summary"
         if "People" in report_data and "Session" in report_data:
             return "attendance"
         return "unknown"
@@ -494,6 +605,9 @@ class BigQuerySyncService:
                 elif rtype == "engagement":
                     rows = self._build_engagement_rows(data, path)
                     self._insert_rows(ENGAGEMENT_TABLE, rows)
+                elif rtype == "management_summary":
+                    rows = self._build_management_summary_rows(data, path)
+                    self._insert_rows(MANAGEMENT_SUMMARY_TABLE, rows)
                 else:
                     result["status"] = "skipped"
                     result["error_msg"] = "Unknown report type"
@@ -559,19 +673,21 @@ class BigQuerySyncService:
         fname   = Path(report_path).name
 
         base = {
-            "center_id":        self.center_id,
-            "sync_timestamp":   ts,
-            "report_date":      rdate,
-            "session_date":     _date_only_string_field(session.get("date")),
-            "camera":           session.get("camera"),
-            "source_video":     session.get("source_video"),
-            "session_duration": session.get("duration"),
-            "unique_people":    counts.get("unique_people", 0),
-            "returning_count":  counts.get("returning", 0),
-            "visitor_count":    counts.get("visitors", 0),
+            "center_id":          self.center_id,
+            "sync_timestamp":     ts,
+            "report_date":        rdate,
+            "session_date":       _date_only_string_field(session.get("date")),
+            "classroom":          session.get("classroom"),
+            "camera":             session.get("camera"),
+            "source_video":       session.get("source_video"),
+            "source_video_path":  session.get("source_video_path"),
+            "session_duration":   session.get("duration"),
+            "unique_people":      counts.get("unique_people", 0),
+            "returning_count":    counts.get("returning", 0),
+            "visitor_count":      counts.get("visitors", 0),
             "identified_students": counts.get("identified_students", 0),
-            "nf_presence":      counts.get("nf_presence", 0),
-            "report_file":      fname,
+            "nf_presence":        counts.get("nf_presence", 0),
+            "report_file":        fname,
         }
 
         if not people:
@@ -587,6 +703,9 @@ class BigQuerySyncService:
         seen_person_ids: set[str] = set()
         for person in people:
             pid = person.get("id")
+            # Spec: only G_* / NF_* IDs reach BigQuery attendance rows.
+            if not _is_reportable_attendance_id(pid):
+                continue
             if pid is not None and str(pid).strip() != "":
                 key = str(pid)
                 if key in seen_person_ids:
@@ -608,80 +727,97 @@ class BigQuerySyncService:
             rows.append(row)
         return rows
 
-    def _build_engagement_rows(self, data: Dict, report_path: str) -> List[Dict]:
-        """
-        One BigQuery row per probe/session in engagement reports.
-        Supports both:
-         - class_dynamics_report.json (hourly_probes)
-         - management_summary_report.json (sessions)
-        """
-        ts     = self._now_ts()
-        rdate  = self._parse_report_date(data)
-        fname  = Path(report_path).name
-        probes = data.get("hourly_probes", [])
-        sessions = data.get("sessions", [])
-        dur    = data.get("event_duration_summary", {})
-
-        base = {
+    def _engagement_report_base(self, data: Dict, report_path: str) -> Dict[str, Any]:
+        ts = self._now_ts()
+        rdate = self._parse_report_date(data)
+        fname = Path(report_path).name
+        video_path = data.get("video_path") or data.get("video") or data.get("source_video")
+        dur = data.get("event_duration_summary", {})
+        return {
             "center_id":             self.center_id,
             "sync_timestamp":        ts,
             "report_date":           rdate,
+            "video_id":              _derive_video_id(video_path),
+            "video_path":            video_path,
             "classroom":             data.get("classroom"),
             "recording_date_str":    data.get("recording_date"),
             "baseline_max_students": data.get("baseline_max_students"),
             "report_type":           data.get("report_type"),
+            "report_file":           fname,
             "lecture_sec":           dur.get("Lecture_sec"),
-            # Support old + new naming from classroom mode updates.
             "activity_sec":          dur.get("Activity_sec", dur.get("Interactive_sec")),
             "chaos_sec":             dur.get("Chaos_sec", dur.get("TransitionSparse_sec")),
             "break_sec":             dur.get("Break_sec"),
-            "report_file":           fname,
         }
 
-        if probes:
-            rows = []
-            for probe in probes:
-                row = dict(base)
-                row.update({
-                    "probe_index":           probe.get("time_slice"),
-                    "video_timestamp_sec":   probe.get("video_timestamp_sec"),
-                    "real_world_time":       probe.get("real_world_time"),
-                    "student_count":         probe.get("student_count_corrected") or probe.get("student_count"),
-                    "avg_engagement":        probe.get("avg_engagement"),
-                    "class_mode":            probe.get("class_mode"),
-                    "activity_distribution": json.dumps(probe.get("activity_distribution", {})),
-                    "attention_distribution":json.dumps(probe.get("attention_distribution", {})),
-                })
-                rows.append(row)
-            return rows
+    def _build_engagement_rows(self, data: Dict, report_path: str) -> List[Dict]:
+        """
+        One BigQuery row per probe in class dynamics reports.
+        Activity and attention distributions are flattened into scalar columns.
+        """
+        base = self._engagement_report_base(data, report_path)
+        probes = data.get("hourly_probes", [])
 
-        if sessions:
-            rows = []
-            for idx, session in enumerate(sessions, start=1):
-                row = dict(base)
-                behavior_profile = session.get("behavior_profile", {})
-                row.update({
-                    "probe_index":            f"Session {idx}",
-                    "video_timestamp_sec":    None,
-                    "real_world_time":        session.get("time_window"),
-                    "student_count":          session.get("avg_student_count"),
-                    "avg_engagement":         session.get("overall_engagement_score"),
-                    "class_mode":             session.get("session_mode"),
-                    "activity_distribution":  json.dumps(behavior_profile),
-                    "attention_distribution": None,
-                })
-                rows.append(row)
-            return rows
-
-        if not probes and not sessions:
+        if not probes:
             row = dict(base)
             row.update({
-                "probe_index": None, "video_timestamp_sec": None,
-                "real_world_time": None, "student_count": None,
-                "avg_engagement": None, "class_mode": None,
-                "activity_distribution": None, "attention_distribution": None,
+                "time_slice": None,
+                "video_timestamp_sec": None,
+                "real_world_time": None,
+                "student_count": None,
+                "avg_engagement": None,
+                "class_mode": None,
+                **_flatten_activity_distribution({}),
+                **_flatten_attention_distribution({}),
             })
             return [row]
+
+        rows = []
+        for probe in probes:
+            row = dict(base)
+            row.update({
+                "time_slice": probe.get("time_slice"),
+                "video_timestamp_sec": probe.get("video_timestamp_sec"),
+                "real_world_time": probe.get("real_world_time"),
+                "student_count": probe.get("student_count_corrected") or probe.get("student_count"),
+                "avg_engagement": probe.get("avg_engagement"),
+                "class_mode": probe.get("class_mode"),
+                **_flatten_activity_distribution(probe.get("activity_distribution")),
+                **_flatten_attention_distribution(probe.get("attention_distribution")),
+            })
+            rows.append(row)
+        return rows
+
+    def _build_management_summary_rows(self, data: Dict, report_path: str) -> List[Dict]:
+        """One BigQuery row per grouped session in management summary reports."""
+        base = self._engagement_report_base(data, report_path)
+        for key in ("lecture_sec", "activity_sec", "chaos_sec", "break_sec"):
+            base.pop(key, None)
+
+        sessions = data.get("sessions", [])
+        if not sessions:
+            row = dict(base)
+            row.update({
+                "session_mode": None,
+                "time_window": None,
+                "avg_student_count": None,
+                "overall_engagement_score": None,
+                **_flatten_behavior_profile({}),
+            })
+            return [row]
+
+        rows = []
+        for session in sessions:
+            row = dict(base)
+            row.update({
+                "session_mode": session.get("session_mode"),
+                "time_window": session.get("time_window"),
+                "avg_student_count": session.get("avg_student_count"),
+                "overall_engagement_score": session.get("overall_engagement_score"),
+                **_flatten_behavior_profile(session.get("behavior_profile")),
+            })
+            rows.append(row)
+        return rows
 
     # ------------------------------------------------------------------
     # Insert

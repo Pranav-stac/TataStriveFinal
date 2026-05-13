@@ -78,10 +78,16 @@ class ClassroomWorker(QThread):
                 _ = torch.__version__
             except (OSError, ImportError) as torch_err:
                 err_msg = (
-                    "PyTorch failed to load (DLL error). Try installing CPU-only PyTorch:\n\n"
-                    "pip uninstall torch torchvision\n"
-                    "pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu\n\n"
-                    "Or install Microsoft Visual C++ Redistributable 2015-2022 from Microsoft's website."
+                    "PyTorch failed to load (DLL error).\n\n"
+                    "Most common cause on Windows: Microsoft Visual C++ 2015-2022 "
+                    "Redistributable (x64) is missing.\n"
+                    "Download: https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+                    "Install, restart the machine, then relaunch the app.\n\n"
+                    "If the error persists, install CPU-only PyTorch:\n"
+                    "  pip uninstall torch torchvision\n"
+                    "  pip install torch torchvision --index-url "
+                    "https://download.pytorch.org/whl/cpu\n\n"
+                    f"Original error: {torch_err}"
                 )
                 self.error.emit(err_msg)
                 return
@@ -558,6 +564,16 @@ class FaceEngagementAnalyzerWithCallbacks:
         else:
             video_metadata = {"classroom": "Unknown", "base_datetime": None, "base_datetime_str": "Unknown"}
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # Apply configured fallback when VLM returned no classroom — keeps the
+        # ClassRoom Name consistent across runs even when the VLM is unavailable.
+        classroom_fallback = str(self.config.get("classroom_name_fallback") or "").strip()
+        if (
+            not video_metadata.get("classroom")
+            or str(video_metadata["classroom"]).strip().lower() in {"", "unknown", "none"}
+        ) and classroom_fallback:
+            video_metadata["classroom"] = classroom_fallback
+            self._log(f"Classroom (fallback): {classroom_fallback}", "info")
         
         # Sampling config from GUI (defaults match original)
         PROBE_DURATION_SEC = self.config.get("probe_duration", 300)
@@ -651,6 +667,12 @@ class FaceEngagementAnalyzerWithCallbacks:
         
         # Process probes
         total_probes = len(start_frames)
+        # Emit a progress update only when the integer percent changes, and only
+        # send preview frames every Nth frame, to keep the Qt event loop responsive
+        # on lower-end laptops. (Matches the attendance worker's _last_emit_pct
+        # behaviour.)
+        _last_emit_pct = -1
+        PREVIEW_EVERY_N_FRAMES = 10
         for probe_idx, start_f in enumerate(start_frames):
             if self._should_stop():
                 break
@@ -676,9 +698,17 @@ class FaceEngagementAnalyzerWithCallbacks:
                 
                 # Progress calculation (0-90% for main loop; 90-100% reserved for stitching/report)
                 total_work = total_probes * probe_frames
-                if total_work > 0 and frames_processed % 50 == 0:
-                    overall_progress = min(90, int((probe_idx * probe_frames + frames_processed) / total_work * 90))
-                    self._progress(overall_progress, f"Probe {probe_idx + 1}/{total_probes} - Frame {frames_processed}/{probe_frames}")
+                if total_work > 0:
+                    overall_progress = min(
+                        90,
+                        int((probe_idx * probe_frames + frames_processed) / total_work * 90),
+                    )
+                    if overall_progress != _last_emit_pct:
+                        _last_emit_pct = overall_progress
+                        self._progress(
+                            overall_progress,
+                            f"Probe {probe_idx + 1}/{total_probes} - Frame {frames_processed}/{probe_frames}",
+                        )
                 
                 if frames_processed % FRAME_SKIP == 0:
                     tracked_bodies = []  # Always init so frame callback can iterate
@@ -795,8 +825,10 @@ class FaceEngagementAnalyzerWithCallbacks:
                                     body['activity'] = 'detected'
                                     body['state'] = ''
                     
-                    # Draw annotations and send frame for real-time preview (every frame)
-                    if self.frame_callback:
+                    # Draw annotations and send frame for real-time preview.
+                    # Throttle to every Nth frame to reduce Qt event-loop pressure
+                    # and avoid UI freezes on weaker hardware.
+                    if self.frame_callback and (frames_processed % PREVIEW_EVERY_N_FRAMES == 0):
                         preview_frame = frame.copy()
                         for body in tracked_bodies:
                             x1, y1, x2, y2 = [int(v) for v in body['bbox']]
@@ -949,16 +981,18 @@ class FaceEngagementAnalyzerWithCallbacks:
             
             for entry in final_hourly_report[1:]:
                 probe_start = entry["video_timestamp_sec"]
-                probe_end = probe_start + PROBE_DURATION_SEC
-                
+                probe_end = probe_start + PROBE_INTERVAL_SEC
+
                 if entry["class_mode"] == current_event["type"]:
                     current_event["probe_indices"].append(entry["time_slice"])
                 else:
-                    # Close current event
+                    # Close current event. Each probe represents PROBE_INTERVAL_SEC of
+                    # wall-clock time (the sampling cadence), not PROBE_DURATION_SEC
+                    # which is just the size of the sample window inside each probe.
                     current_event["end_time_sec"] = current_event["start_time_sec"] + (
-                        len(current_event["probe_indices"]) * PROBE_DURATION_SEC
+                        len(current_event["probe_indices"]) * PROBE_INTERVAL_SEC
                     )
-                    current_event["duration_sec"] = len(current_event["probe_indices"]) * PROBE_DURATION_SEC
+                    current_event["duration_sec"] = len(current_event["probe_indices"]) * PROBE_INTERVAL_SEC
                     if video_metadata["base_datetime"] is not None:
                         end_dt = video_metadata["base_datetime"] + timedelta(seconds=current_event["end_time_sec"])
                         current_event["end_real_time"] = end_dt.strftime("%I:%M:%S %p")
@@ -979,9 +1013,9 @@ class FaceEngagementAnalyzerWithCallbacks:
             
             # Close last event
             current_event["end_time_sec"] = current_event["start_time_sec"] + (
-                len(current_event["probe_indices"]) * PROBE_DURATION_SEC
+                len(current_event["probe_indices"]) * PROBE_INTERVAL_SEC
             )
-            current_event["duration_sec"] = len(current_event["probe_indices"]) * PROBE_DURATION_SEC
+            current_event["duration_sec"] = len(current_event["probe_indices"]) * PROBE_INTERVAL_SEC
             if video_metadata["base_datetime"] is not None:
                 end_dt = video_metadata["base_datetime"] + timedelta(seconds=current_event["end_time_sec"])
                 current_event["end_real_time"] = end_dt.strftime("%I:%M:%S %p")
@@ -995,7 +1029,9 @@ class FaceEngagementAnalyzerWithCallbacks:
         # Save report (matching original structure)
         report_path = os.path.join(self.output_dir, "class_dynamics_report.json")
         report_data = {
-            "video_path": self.video_path,
+            # Absolute path keeps every processed lecture traceable even when the
+            # input folder moves or the report is copied across machines.
+            "video_path": os.path.abspath(self.video_path),
             "classroom": video_metadata["classroom"],
             "recording_date": video_metadata["base_datetime_str"],
             "report_type": "Corrected (Stitched)",
@@ -1026,11 +1062,13 @@ class FaceEngagementAnalyzerWithCallbacks:
         with open(report_path, 'w') as f:
             json.dump(report_data, f, indent=4)
 
-        # Generate grouped management report (new shared format)
+        # Generate grouped management report (new shared format).
+        # Pass PROBE_INTERVAL_SEC so time-window end times advance by the wall-clock
+        # cadence (e.g. 30 min) rather than the 5-min sample window inside each probe.
         try:
             mgmt_path = os.path.join(self.output_dir, "management_summary_report.json")
             generated_path = generate_management_summary(
-                report_path, mgmt_path, probe_duration_sec=PROBE_DURATION_SEC
+                report_path, mgmt_path, probe_interval_sec=PROBE_INTERVAL_SEC
             )
             if generated_path:
                 self._log(f"Management summary saved: {generated_path}", "success")

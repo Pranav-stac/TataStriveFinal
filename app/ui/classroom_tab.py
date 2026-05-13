@@ -1,7 +1,7 @@
 """
 Classroom Analysis Tab.
 UI for running classroom engagement analysis.
-Settings are configured via the main Settings dialog (Ctrl+,).
+Open Settings (Ctrl+,) for preview preferences; analysis defaults are fixed in the app.
 """
 
 import os
@@ -365,6 +365,10 @@ class ClassroomTab(QWidget):
         )
 
         classroom_config = self.config.get_section("classroom")
+        # Propagate the shared ClassRoom Name fallback so it survives VLM failures.
+        classroom_config["classroom_name_fallback"] = self.config.get(
+            "general.classroom_name", ""
+        )
         inference_config = self.config.get_section("inference")
         self._worker = ClassroomWorker(
             video_path=video_path,

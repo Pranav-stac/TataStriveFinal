@@ -12,7 +12,8 @@ Usage (from repository root):
     python scripts/clear_bigquery.py --list-tables   # show all tables (e.g. manual copies like attendance_reports_*)
     python scripts/clear_bigquery.py --yes --drop    # DROP + recreate empty (if TRUNCATE still shows rows — streaming)
 
-Only these tables are cleared: attendance_reports, engagement_reports, sync_log.
+Only these tables are cleared: attendance_reports, engagement_reports,
+management_summary_reports, sync_log.
 If the UI still shows rows after TRUNCATE, use --drop (streaming inserts buffer).
 Tables such as attendance_reports_31032026 are separate — not touched here.
 
@@ -33,6 +34,7 @@ from app.bigquery_sync import (  # noqa: E402
     ATTENDANCE_TABLE,
     DATASET_ID,
     ENGAGEMENT_TABLE,
+    MANAGEMENT_SUMMARY_TABLE,
     PROJECT_ID,
     SYNC_LOG_TABLE,
     BigQuerySyncService,
@@ -66,7 +68,7 @@ def main() -> int:
 
     print(f"Project: {PROJECT_ID}")
     print(f"Dataset: {DATASET_ID}")
-    print(f"Tables:  {ATTENDANCE_TABLE}, {ENGAGEMENT_TABLE}, {SYNC_LOG_TABLE}")
+    print(f"Tables:  {ATTENDANCE_TABLE}, {ENGAGEMENT_TABLE}, {MANAGEMENT_SUMMARY_TABLE}, {SYNC_LOG_TABLE}")
     creds = args.creds or _creds_path()
     if creds:
         print(f"Creds:   {creds}")
@@ -81,7 +83,7 @@ def main() -> int:
             print(f"Error: {e}")
             return 2
         ds_ref = f"{PROJECT_ID}.{DATASET_ID}"
-        managed = {ATTENDANCE_TABLE, ENGAGEMENT_TABLE, SYNC_LOG_TABLE}
+        managed = {ATTENDANCE_TABLE, ENGAGEMENT_TABLE, MANAGEMENT_SUMMARY_TABLE, SYNC_LOG_TABLE}
         print(f"\nAll tables in `{ds_ref}`:")
         try:
             for t in sorted(client.list_tables(ds_ref), key=lambda x: x.table_id):
@@ -94,7 +96,7 @@ def main() -> int:
             return 2
         print(
             "\nThe app syncs only to: "
-            f"{ATTENDANCE_TABLE}, {ENGAGEMENT_TABLE}, {SYNC_LOG_TABLE}."
+            f"{ATTENDANCE_TABLE}, {ENGAGEMENT_TABLE}, {MANAGEMENT_SUMMARY_TABLE}, {SYNC_LOG_TABLE}."
         )
         return 0
 
