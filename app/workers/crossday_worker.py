@@ -270,15 +270,14 @@ class CrossDayAnalyzerWithCallbacks:
         DAY_LABEL = self.config.get("day_label", "Day1")
 
         crossday_cfg = self.config.get("crossday") or {}
-        T_STRICT_MERGE = float(crossday_cfg.get("t_strict_merge", 0.36))
-        T_NEW_ID = float(crossday_cfg.get("t_new_id", 0.22))
-        T_RATIO_MARGIN = float(crossday_cfg.get("t_ratio_margin", 0.05))
+        T_STRICT_MERGE = float(crossday_cfg.get("t_strict_merge", 0.55))
+        T_NEW_ID = float(crossday_cfg.get("t_new_id", 0.35))
+        T_RATIO_MARGIN = float(crossday_cfg.get("t_ratio_margin", 0.10))
         NF_MIN_FRAMES = max(5, int(crossday_cfg.get("nf_min_frames_before_label", 12)))
-        MIN_SAMPLES = max(1, int(crossday_cfg.get("min_samples", 2)))
-        # InsightFace gives strong single-frame embeddings; match can start before MIN_SAMPLES collected.
-        MIN_EMBEDS_FOR_MATCH = max(1, int(crossday_cfg.get("min_embeds_for_match", 1)))
+        MIN_SAMPLES = max(1, int(crossday_cfg.get("min_samples", 8)))
+        MIN_EMBEDS_FOR_MATCH = max(1, int(crossday_cfg.get("min_embeds_for_match", 8)))
         MIN_EMBEDS_FOR_MATCH = min(MIN_EMBEDS_FOR_MATCH, MIN_SAMPLES)
-        MIN_POST_SAMPLES = max(1, int(crossday_cfg.get("min_post_samples", 2)))
+        MIN_POST_SAMPLES = max(1, int(crossday_cfg.get("min_post_samples", 8)))
         MAX_EXEMPLARS = 5
         T_OUTLIER = 0.6
         VISITOR_UPGRADE_DAYS = int(crossday_cfg.get("visitor_upgrade_days", 3))
@@ -485,11 +484,36 @@ class CrossDayAnalyzerWithCallbacks:
         if enable_ocr_timestamp:
             try:
                 import easyocr
-                ocr_reader = easyocr.Reader(['en'], gpu=False)
+                from classroom_analysis.model_weights import resolve_weights_dir
+                weights_dir, _ = resolve_weights_dir()
+                easyocr_dir = os.path.join(weights_dir, "easyocr")
+                os.makedirs(easyocr_dir, exist_ok=True)
+                ocr_reader = easyocr.Reader(
+                    ['en'],
+                    gpu=False,
+                    model_storage_directory=easyocr_dir,
+                )
                 self._log(f"OCR timestamp enabled (interval={ocr_interval}, roi={timestamp_coords})", "success")
             except Exception as e:
                 self._log(f"EasyOCR unavailable ({e}). Falling back to video timeline timestamps.", "warning")
                 enable_ocr_timestamp = False
+        try:
+            from classroom_analysis.model_weights import resolve_ultralytics_botsort_yaml
+            botsort_tracker_yaml = resolve_ultralytics_botsort_yaml()
+            self._log(f"BoT-SORT tracker config: {botsort_tracker_yaml}", "info")
+        except Exception as e:
+            botsort_tracker_yaml = "botsort.yaml"
+            self._log(f"BoT-SORT tracker config fallback ({e})", "warning")
+        try:
+            from classroom_analysis.ocr_overlay import (
+                parse_ocr_overlay_datetime,
+                read_ocr_overlay_frame,
+            )
+        except ImportError:
+            def parse_ocr_overlay_datetime(text: str):
+                return None, None
+            def read_ocr_overlay_frame(frame, reader, coords):
+                return None, None, ""
         self._progress(11, "Loading database…")
         
         def _is_nf_id(gid) -> bool:
@@ -782,73 +806,6 @@ class CrossDayAnalyzerWithCallbacks:
                     gallery["exemplars"].pop(0)
                 gallery["exemplars"].append(new_emb)
 
-        def parse_ocr_overlay_datetime(text: str):
-            """
-            Parse DVR on-screen text into (YYYY-MM-DD or None, HH:MM:SS or None).
-            Supports: YYYY-MM-DD, MM-DD-YYYY / DD-MM-YYYY (heuristic), DD/MM/YYYY.
-            """
-            if not text:
-                return None, None
-            text = " ".join(text.split())
-            d_iso = None
-            m = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
-            if m:
-                y, mo, d = m.groups()
-                try:
-                    d_iso = datetime(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
-                except ValueError:
-                    pass
-            if not d_iso:
-                m = re.search(r"(\d{2})-(\d{2})-(\d{4})", text)
-                if m:
-                    a, b, y = m.groups()
-                    ia, ib = int(a), int(b)
-                    try:
-                        if 1 <= ia <= 12 and 1 <= ib <= 31:
-                            d_iso = datetime(int(y), ia, ib).strftime("%Y-%m-%d")
-                        elif 1 <= ib <= 12 and 1 <= ia <= 31:
-                            d_iso = datetime(int(y), ib, ia).strftime("%Y-%m-%d")
-                    except ValueError:
-                        pass
-            if not d_iso:
-                m = re.search(r"(\d{2})/(\d{2})/(\d{4})", text)
-                if m:
-                    a, b, y = m.groups()
-                    ia, ib = int(a), int(b)
-                    try:
-                        if 1 <= ib <= 12 and 1 <= ia <= 31:
-                            d_iso = datetime(int(y), ib, ia).strftime("%Y-%m-%d")
-                        elif 1 <= ia <= 12 and 1 <= ib <= 31:
-                            d_iso = datetime(int(y), ia, ib).strftime("%Y-%m-%d")
-                    except ValueError:
-                        pass
-            tm = re.search(r"(\d{2}:\d{2}:\d{2})", text)
-            t_str = tm.group(1) if tm else None
-            return d_iso, t_str
-
-        def read_ocr_overlay_frame(frame):
-            """OCR timestamp ROI: returns (date YYYY-MM-DD|None, time HH:MM:SS|None, raw_joined_text)."""
-            if ocr_reader is None:
-                return None, None, ""
-            if frame is None or not hasattr(frame, "shape"):
-                return None, None, ""
-            x, y, w_roi, h_roi = timestamp_coords
-            if y + h_roi > frame.shape[0] or x + w_roi > frame.shape[1]:
-                return None, None, ""
-            roi = frame[y:y + h_roi, x:x + w_roi]
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            gray_large = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-            contrast_img = clahe.apply(gray_large)
-            blurred = cv2.GaussianBlur(contrast_img, (3, 3), 0)
-            kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-            final_img = cv2.filter2D(blurred, -1, kernel)
-            allowlist = "0123456789:/.- MonTueWedThuFriSatSun"
-            results = ocr_reader.readtext(final_img, allowlist=allowlist, detail=0)
-            text = " ".join(results)
-            d_iso, t_str = parse_ocr_overlay_datetime(text)
-            return d_iso, t_str, text
-
         def map_identities_to_students():
             if not student_db:
                 self._log("Student DB unavailable; skipping enrolled-student mapping.", "info")
@@ -931,7 +888,9 @@ class CrossDayAnalyzerWithCallbacks:
                 
                 fallback_timestamp = datetime.fromtimestamp(frame_idx / max(1, fps)).strftime('%H:%M:%S')
                 if enable_ocr_timestamp and frame_idx % ocr_interval == 0:
-                    ocr_d, ocr_t, ocr_raw = read_ocr_overlay_frame(frame)
+                    ocr_d, ocr_t, ocr_raw = read_ocr_overlay_frame(
+                        frame, ocr_reader, timestamp_coords
+                    )
                     raw_s = (ocr_raw or "").strip()
                     pair = (ocr_d, ocr_t)
                     if raw_s or ocr_d or ocr_t:
@@ -978,7 +937,15 @@ class CrossDayAnalyzerWithCallbacks:
                 
                 # Parallel: YOLO tracking + Face detection (independent, run concurrently)
                 def run_yolo():
-                    return person_model.track(frame, persist=True, classes=[0], tracker="botsort.yaml", verbose=False, imgsz=yolo_imgsz, device=device)
+                    return person_model.track(
+                        frame,
+                        persist=True,
+                        classes=[0],
+                        tracker=botsort_tracker_yaml,
+                        verbose=False,
+                        imgsz=yolo_imgsz,
+                        device=device,
+                    )
 
                 def run_face():
                     if face_app is None or not effective_face_mode or (frame_idx % frame_skip) != 0:

@@ -33,6 +33,24 @@ class SettingsDialog(QDialog):
         general_form.addWidget(self.preview_checkbox)
         layout.addWidget(general_group)
 
+        processing_group = QGroupBox("Processing")
+        processing_form = QVBoxLayout(processing_group)
+        self.delete_classroom_checkbox = QCheckBox(
+            "Delete source video after engagement analysis completes"
+        )
+        self.delete_classroom_checkbox.setToolTip(
+            "When enabled, the source video file is removed after a successful engagement run."
+        )
+        self.delete_crossday_checkbox = QCheckBox(
+            "Delete source video after attendance analysis completes"
+        )
+        self.delete_crossday_checkbox.setToolTip(
+            "When enabled, the source video file is removed after a successful attendance run."
+        )
+        processing_form.addWidget(self.delete_classroom_checkbox)
+        processing_form.addWidget(self.delete_crossday_checkbox)
+        layout.addWidget(processing_group)
+
         button_layout = QHBoxLayout()
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.clicked.connect(self._reset_defaults)
@@ -49,9 +67,25 @@ class SettingsDialog(QDialog):
 
     def _load_settings(self):
         self.preview_checkbox.setChecked(self.config.get("preview_enabled", False))
+        self.delete_classroom_checkbox.setChecked(
+            self.config.get("classroom.delete_video_after_processing", False)
+        )
+        self.delete_crossday_checkbox.setChecked(
+            self.config.get("crossday.delete_video_after_processing", False)
+        )
 
     def _save_and_accept(self):
-        self.config.set("preview_enabled", self.preview_checkbox.isChecked(), save=True)
+        self.config.set("preview_enabled", self.preview_checkbox.isChecked(), save=False)
+        self.config.set(
+            "classroom.delete_video_after_processing",
+            self.delete_classroom_checkbox.isChecked(),
+            save=False,
+        )
+        self.config.set(
+            "crossday.delete_video_after_processing",
+            self.delete_crossday_checkbox.isChecked(),
+            save=True,
+        )
         self.accept()
 
     def _reset_defaults(self):

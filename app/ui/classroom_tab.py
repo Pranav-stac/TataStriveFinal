@@ -369,6 +369,15 @@ class ClassroomTab(QWidget):
         classroom_config["classroom_name_fallback"] = self.config.get(
             "general.classroom_name", ""
         )
+        crossday_cfg = self.config.get_section("crossday")
+        if "enable_ocr_timestamp" not in classroom_config:
+            classroom_config["enable_ocr_timestamp"] = crossday_cfg.get(
+                "enable_ocr_timestamp", True
+            )
+        if "timestamp_coords" not in classroom_config:
+            classroom_config["timestamp_coords"] = crossday_cfg.get(
+                "timestamp_coords", [0, 15, 600, 90]
+            )
         inference_config = self.config.get_section("inference")
         self._worker = ClassroomWorker(
             video_path=video_path,

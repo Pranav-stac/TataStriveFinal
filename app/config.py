@@ -41,21 +41,24 @@ class ConfigManager:
             "delete_video_after_processing": False,
             # Tracks probe-interval default migrations; bump when the default changes.
             "probe_interval_defaults_revision": 1,
+            # Overlay OCR for recording datetime on engagement reports (same ROI as crossday).
+            "enable_ocr_timestamp": True,
+            "timestamp_coords": [0, 15, 600, 90],
         },
         "general": {
             # Fallback classroom name when VLM/OCR can't extract one. Stored in every report.
             "classroom_name": "",
         },
         "crossday": {
-            # Face gallery: slightly strict to separate identities; margin only when 2nd is also strong
-            "t_strict_merge": 0.36,
-            "t_new_id": 0.22,
-            "t_ratio_margin": 0.05,
+            # Strict baseline face-gallery thresholds
+            "t_strict_merge": 0.55,
+            "t_new_id": 0.35,
+            "t_ratio_margin": 0.10,
             # With face pipeline on, wait this many frames before NF_* (gives InsightFace time to crop)
             "nf_min_frames_before_label": 12,
-            "min_samples": 2,  # Stop collecting face crops after this many (centroid stability)
-            "min_embeds_for_match": 1,  # Try gallery match with this many embeddings (1 = first InsightFace vec)
-            "min_post_samples": 2,  # Post-video pass: min embeddings to resolve track
+            "min_samples": 8,
+            "min_embeds_for_match": 8,
+            "min_post_samples": 8,
             "max_exemplars": 5,
             "t_outlier": 0.6,
             "t_match_student": 0.40,
@@ -149,54 +152,74 @@ class ConfigManager:
 
     def _migrate_crossday_face_defaults(self) -> None:
         """
-        Persisted config.json overrides DEFAULT_CONFIG, so old strict Settings values
-        (e.g. t_strict_merge=0.9, min_samples=9) never picked up new lenient defaults.
-        One-time migration when face_match_defaults_revision < 2.
+        Persisted config.json overrides DEFAULT_CONFIG. Revisions bump shipped face-match
+        defaults without overwriting user-tuned values.
         """
         cd = self._config.setdefault("crossday", {})
         try:
             old_rev = int(cd.get("face_match_defaults_revision", 0))
         except (TypeError, ValueError):
             old_rev = 0
-        if old_rev >= 2:
+        if old_rev >= 3:
             return
 
         d = self.DEFAULT_CONFIG["crossday"]
         changed = False
 
-        try:
-            strict = float(cd.get("t_strict_merge", d["t_strict_merge"]))
-        except (TypeError, ValueError):
-            strict = float(d["t_strict_merge"])
-        if strict >= 0.70:
-            cd["t_strict_merge"] = d["t_strict_merge"]
-            changed = True
+        if old_rev < 2:
+            try:
+                strict = float(cd.get("t_strict_merge", d["t_strict_merge"]))
+            except (TypeError, ValueError):
+                strict = float(d["t_strict_merge"])
+            if strict >= 0.70:
+                cd["t_strict_merge"] = 0.36
+                changed = True
 
-        try:
-            nid = float(cd.get("t_new_id", d["t_new_id"]))
-        except (TypeError, ValueError):
-            nid = float(d["t_new_id"])
-        if nid <= 0.12:
-            cd["t_new_id"] = d["t_new_id"]
-            changed = True
+            try:
+                nid = float(cd.get("t_new_id", d["t_new_id"]))
+            except (TypeError, ValueError):
+                nid = float(d["t_new_id"])
+            if nid <= 0.12:
+                cd["t_new_id"] = 0.22
+                changed = True
 
-        try:
-            ms = int(cd.get("min_samples", d["min_samples"]))
-        except (TypeError, ValueError):
-            ms = int(d["min_samples"])
-        if ms >= 6:
-            cd["min_samples"] = d["min_samples"]
-            changed = True
+            try:
+                ms = int(cd.get("min_samples", d["min_samples"]))
+            except (TypeError, ValueError):
+                ms = int(d["min_samples"])
+            if ms >= 6:
+                cd["min_samples"] = 2
+                changed = True
 
-        if changed:
-            cd["t_ratio_margin"] = d["t_ratio_margin"]
-            if "min_embeds_for_match" in d:
-                cd["min_embeds_for_match"] = d["min_embeds_for_match"]
-            if "min_post_samples" in d:
-                cd["min_post_samples"] = d["min_post_samples"]
+            if changed:
+                cd["t_ratio_margin"] = 0.05
+                cd["min_embeds_for_match"] = 1
+                cd["min_post_samples"] = 2
 
-        cd["face_match_defaults_revision"] = 2
-        if changed or old_rev < 2:
+        if old_rev < 3:
+            lenient_defaults = {
+                "t_strict_merge": 0.36,
+                "t_new_id": 0.22,
+                "t_ratio_margin": 0.05,
+                "min_samples": 2,
+                "min_embeds_for_match": 1,
+                "min_post_samples": 2,
+            }
+            for key, old_val in lenient_defaults.items():
+                try:
+                    current = cd.get(key, d[key])
+                    if key.startswith("t_"):
+                        if abs(float(current) - float(old_val)) < 1e-6:
+                            cd[key] = d[key]
+                            changed = True
+                    elif int(current) == int(old_val):
+                        cd[key] = d[key]
+                        changed = True
+                except (TypeError, ValueError):
+                    pass
+
+        cd["face_match_defaults_revision"] = 3
+        if changed or old_rev < 3:
             self._save()
 
     def _migrate_classroom_probe_interval(self) -> None:

@@ -412,31 +412,68 @@ class FaceEngagementAnalyzerWithCallbacks:
         from ultralytics import YOLO
         
         os.makedirs(self.output_dir, exist_ok=True)
+
+        from app.runtime_checks import run_classroom_preflight
+
+        self._progress(0, "Preflight checks")
+        preflight = run_classroom_preflight(self._log)
+        if not preflight.ok:
+            raise RuntimeError(
+                "Preflight failed:\n" + "\n".join(preflight.failures)
+            )
         
         # Import stitching and VLM
         try:
             from classroom_analysis.stitch_logic import perform_hierarchical_stitching
         except ImportError:
-            self._log("Warning: stitch_logic.py not found, stitching disabled", "warning")
             def perform_hierarchical_stitching(json_path, **kwargs): 
                 return {}
             
         try:
             from classroom_analysis.vlm_metadata import extract_camera_metadata_vlm
         except ImportError:
-            self._log("Warning: vlm_metadata.py not found", "warning")
             def extract_camera_metadata_vlm(frame): 
                 return {"classroom": "Unknown", "base_datetime": None, "base_datetime_str": "Unknown"}
         try:
             from classroom_analysis.group_by_session import generate_management_summary
         except ImportError:
-            self._log("Warning: group_by_session.py not found, management summary disabled", "warning")
             def generate_management_summary(*args, **kwargs):
                 return None
+        try:
+            from classroom_analysis.ocr_overlay import (
+                apply_ocr_datetime_to_metadata,
+                read_ocr_overlay_frame,
+            )
+        except ImportError:
+            def read_ocr_overlay_frame(*args, **kwargs):
+                return None, None, ""
+            def apply_ocr_datetime_to_metadata(*args, **kwargs):
+                return False
+        try:
+            from classroom_analysis.model_weights import (
+                model_weight_candidates,
+                resolve_model_weight,
+                resolve_weights_dir,
+            )
+        except ImportError:
+            def resolve_weights_dir():
+                base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                weights_dir = os.path.join(base_path, "Models")
+                if not os.path.exists(weights_dir):
+                    weights_dir = base_path
+                return weights_dir, base_path
+            def model_weight_candidates(weight_file, weights_dir=None, base_path=None):
+                bp = base_path or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                wd = weights_dir or os.path.join(bp, "Models")
+                return [os.path.join(wd, weight_file), os.path.join(bp, weight_file)]
+            def resolve_model_weight(weight_file, weights_dir=None, base_path=None):
+                for candidate in model_weight_candidates(weight_file, weights_dir, base_path):
+                    if os.path.isfile(candidate):
+                        return candidate
+                return None
         
-        self._log("Loading detection models...")
-        
-        # Device setup (allow forcing CPU from settings)
+        self._progress(5, "Loading models…")
+
         force_cpu = bool(self.inference_config.get("force_cpu", False))
         if force_cpu:
             self.device = 'cpu'
@@ -447,60 +484,15 @@ class FaceEngagementAnalyzerWithCallbacks:
         else:
             self.device = 'cpu'
             self.use_fp16 = False
-        device = self.device  # local alias used throughout this method
-        if force_cpu:
-            self._log("CPU-only mode enabled from settings")
-        self._log(f"Running on: {device}")
+        device = self.device
         
         # Resolve Models path (project root or frozen app)
-        # Frozen: prefer Models/ next to the exe (build_exe post-build copy; user can replace
-        # bad .pt files without rebuilding), then _internal/Models from PyInstaller add-data.
-        base_path = None
-        try:
-            if getattr(sys, "frozen", False):
-                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-                exe_models = os.path.join(exe_dir, "Models")
-                bundle_models = os.path.join(sys._MEIPASS, "Models")
-                if os.path.isdir(exe_models):
-                    weights_dir = exe_models
-                elif os.path.isdir(bundle_models):
-                    weights_dir = bundle_models
-                else:
-                    weights_dir = sys._MEIPASS
-            else:
-                base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                weights_dir = os.path.join(base_path, "Models")
-                if not os.path.exists(weights_dir):
-                    weights_dir = base_path
-        except Exception:
-            base_path = os.getcwd()
-            weights_dir = os.path.join(base_path, "Models")
-            if not os.path.exists(weights_dir):
-                weights_dir = base_path
-
-        def _yolo_weight_candidates(weight_file: str) -> List[str]:
-            """All locations build_exe / runtime may place a .pt (order = load preference)."""
-            if getattr(sys, "frozen", False):
-                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-                mp = sys._MEIPASS
-                return [
-                    os.path.join(exe_dir, "Models", weight_file),
-                    os.path.join(exe_dir, weight_file),
-                    os.path.join(weights_dir, weight_file),
-                    os.path.join(mp, "Models", weight_file),
-                    os.path.join(mp, weight_file),
-                ]
-            bp = base_path or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            return [
-                os.path.join(weights_dir, weight_file),
-                os.path.join(bp, "Models", weight_file),
-                os.path.join(bp, weight_file),
-            ]
+        weights_dir, base_path = resolve_weights_dir()
 
         # Load models (check Models/ first; face model not in ultralytics hub — custom file)
         models = {}
         for name, file in {'detection': 'yolov8m.pt', 'pose': 'yolov8n-pose.pt', 'face': 'yolov8n-face.pt'}.items():
-            candidates = _yolo_weight_candidates(file)
+            candidates = model_weight_candidates(file, weights_dir, base_path)
             path = None
             for c in candidates:
                 if os.path.isfile(c):
@@ -513,7 +505,6 @@ class FaceEngagementAnalyzerWithCallbacks:
                 if hasattr(m.model, 'fuse'):
                     m.model.fuse()
                 models[name] = m
-                self._log(f"Loaded {name} model")
             except Exception as e:
                 # Corrupt local .pt or corrupt hub cache — remove all known copies, purge cache, re-fetch
                 if name in ('detection', 'pose'):
@@ -536,14 +527,12 @@ class FaceEngagementAnalyzerWithCallbacks:
                         if hasattr(m.model, 'fuse'):
                             m.model.fuse()
                         models[name] = m
-                        self._log(f"Loaded {name} model")
                     except Exception as e2:
                         self._log(f"Warning: Could not load {name} model: {e2}", "warning")
                 else:
                     self._log(f"Warning: Could not load {name} model: {e}", "warning")
         
         # Open video
-        self._log(f"Opening video: {self.video_path}")
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             raise ValueError("Could not open video file")
@@ -553,10 +542,7 @@ class FaceEngagementAnalyzerWithCallbacks:
         self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        self._log(f"Video: {self.total_frames} frames, {self.fps:.1f} FPS, {self.width}x{self.height}")
-        
         # VLM metadata extraction
-        self._log("Extracting metadata from first frame...")
         ret, first_frame = cap.read()
         if ret and first_frame is not None and isinstance(first_frame, np.ndarray) and first_frame.size > 0:
             video_metadata = extract_camera_metadata_vlm(first_frame)
@@ -564,6 +550,41 @@ class FaceEngagementAnalyzerWithCallbacks:
         else:
             video_metadata = {"classroom": "Unknown", "base_datetime": None, "base_datetime_str": "Unknown"}
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        enable_ocr_timestamp = bool(self.config.get("enable_ocr_timestamp", True))
+        timestamp_coords = self.config.get("timestamp_coords", [0, 15, 600, 90])
+        if not isinstance(timestamp_coords, (list, tuple)) or len(timestamp_coords) != 4:
+            timestamp_coords = [0, 15, 600, 90]
+        try:
+            timestamp_coords = tuple(int(v) for v in timestamp_coords)
+        except (TypeError, ValueError):
+            timestamp_coords = (0, 15, 600, 90)
+
+        if enable_ocr_timestamp and ret and first_frame is not None:
+            try:
+                import easyocr
+                easyocr_dir = os.path.join(weights_dir, "easyocr")
+                os.makedirs(easyocr_dir, exist_ok=True)
+                ocr_reader = easyocr.Reader(
+                    ['en'],
+                    gpu=False,
+                    model_storage_directory=easyocr_dir,
+                )
+                ocr_d, ocr_t, ocr_raw = read_ocr_overlay_frame(
+                    first_frame, ocr_reader, timestamp_coords
+                )
+                if apply_ocr_datetime_to_metadata(video_metadata, ocr_d, ocr_t):
+                    self._log(
+                        f"OCR recording datetime (applied): {video_metadata['base_datetime_str']}",
+                        "success",
+                    )
+                elif ocr_raw:
+                    self._log(
+                        f"OCR overlay read but date/time incomplete: {ocr_raw[:220]!r}",
+                        "warning",
+                    )
+            except Exception as ocr_err:
+                self._log(f"OCR metadata unavailable ({ocr_err})", "warning")
 
         # Apply configured fallback when VLM returned no classroom — keeps the
         # ClassRoom Name consistent across runs even when the VLM is unavailable.
@@ -607,51 +628,56 @@ class FaceEngagementAnalyzerWithCallbacks:
             except Exception:
                 pass
 
+        def _init_botsort_tracker():
+            try:
+                import pkg_resources  # noqa: F401 — required by boxmot
+            except ImportError as import_err:
+                raise RuntimeError(
+                    "BoT-SORT requires setuptools with pkg_resources. "
+                    "Install app dependencies with: pip install -r requirements_app.txt"
+                ) from import_err
+            from boxmot import BoTSORT
+
+            reid_weights = resolve_model_weight(
+                "osnet_x1_0_msmt17.pt", weights_dir, base_path
+            )
+            if not reid_weights:
+                raise FileNotFoundError(
+                    "Re-ID weights osnet_x1_0_msmt17.pt not found. "
+                    "Place the file in Models/ or the project root."
+                )
+            self._log(f"Loading BoT-SORT Re-ID weights: {reid_weights}", "info")
+            tracker = BoTSORT(
+                model_weights=Path(reid_weights),
+                device=self.device,
+                fp16=self.use_fp16,
+                track_buffer=300,
+                match_thresh=0.75,
+            )
+            if hasattr(tracker, "model"):
+                self.stitch_model = tracker.model
+            return tracker
+
         try:
             # boxmot/loguru can fail in GUI contexts when std streams are None.
             _ensure_valid_stdio()
             _stabilize_loguru_sink()
-
-            from boxmot import BoTSORT
-            bot_weights = Path(os.path.join(weights_dir, 'osnet_x1_0_msmt17.pt'))
-            if not bot_weights.exists():
-                bot_weights = Path('osnet_x1_0_msmt17.pt')
-            tracker = BoTSORT(
-                model_weights=bot_weights, 
-                device=self.device, 
-                fp16=self.use_fp16, 
-                track_buffer=300, 
-                match_thresh=0.75
-            )
-            if hasattr(tracker, 'model'):
-                self._log("Stitcher model linked", "success")
-                self.stitch_model = tracker.model
-            self._log("Tracker initialized", "success")
+            tracker = _init_botsort_tracker()
+            self._log("BoT-SORT tracker initialized", "success")
         except Exception as e:
             # Retry once after forcing non-None streams (fixes loguru sink errors).
             try:
                 _ensure_valid_stdio()
                 _stabilize_loguru_sink()
-
-                from boxmot import BoTSORT
-                bot_weights = Path(os.path.join(weights_dir, 'osnet_x1_0_msmt17.pt'))
-                if not bot_weights.exists():
-                    bot_weights = Path('osnet_x1_0_msmt17.pt')
-                tracker = BoTSORT(
-                    model_weights=bot_weights,
-                    device=self.device,
-                    fp16=self.use_fp16,
-                    track_buffer=300,
-                    match_thresh=0.75
-                )
-                if hasattr(tracker, 'model'):
-                    self._log("Stitcher model linked", "success")
-                    self.stitch_model = tracker.model
-                self._log("Tracker initialized (retry)", "success")
+                tracker = _init_botsort_tracker()
+                self._log("BoT-SORT tracker initialized (retry)", "success")
             except Exception as retry_err:
-                self._log(f"Tracker init warning: {e}", "warning")
-                self._log(f"Tracker retry failed: {retry_err}", "warning")
-                tracker = None
+                self._log(f"BoT-SORT init failed: {e}", "error")
+                self._log(f"BoT-SORT retry failed: {retry_err}", "error")
+                raise RuntimeError(
+                    "BoT-SORT / Re-ID model failed to load. "
+                    "Ensure osnet_x1_0_msmt17.pt is present in Models/."
+                ) from retry_err
         
         # Initialize RuntimeAnchorManager for ID correction
         anchor_manager = RuntimeAnchorManager(similarity_thresh=0.75, distance_thresh=120)

@@ -8,6 +8,7 @@ PyQt6-Qt6>=6.4.0
 # Core dependencies (numpy<2 required: PyTorch 2.0.x fails with numpy 2.x)
 numpy>=1.21,<2.0
 typing_extensions  # Required by ultralytics, onnxruntime
+setuptools>=65,<81  # boxmot imports pkg_resources (removed in setuptools 82+)
 opencv-python
 # PyTorch 2.0.1 CPU - stable, avoids DLL errors on Windows (use fix_pytorch.bat if issues)
 torch==2.0.1
