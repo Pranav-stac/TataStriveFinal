@@ -440,9 +440,6 @@ class CrossDayTab(QWidget):
         self.progress_panel.log_info(
             f"Processing: {os.path.basename(video_path)}  [{mode}  |  {day_label}]"
         )
-        self.progress_panel.log_video_queue_summary(
-            self._pending_videos, self._current_video
-        )
         self._worker = CrossDayWorker(
             video_path=video_path,
             output_dir=run_output_dir,

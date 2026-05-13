@@ -70,8 +70,6 @@ class ClassroomWorker(QThread):
     def run(self):
         """Run the classroom analysis."""
         try:
-            self.log_message.emit("Initializing classroom analysis...", "info")
-
             try:
                 import torch
                 # Verify torch loads - if DLL fails, we catch it here
@@ -610,8 +608,6 @@ class FaceEngagementAnalyzerWithCallbacks:
             start_frames.append(curr)
             curr += interval_frames
             
-        self._log(f"Sampling: {len(start_frames)} probes of {PROBE_DURATION_SEC}s each")
-        
         # Tracker init (fp16 only on CUDA - CPU lacks half-precision conv support)
         tracker = None
         def _ensure_valid_stdio():
@@ -646,7 +642,6 @@ class FaceEngagementAnalyzerWithCallbacks:
                     "Re-ID weights osnet_x1_0_msmt17.pt not found. "
                     "Place the file in Models/ or the project root."
                 )
-            self._log(f"Loading BoT-SORT Re-ID weights: {reid_weights}", "info")
             tracker = BoTSORT(
                 model_weights=Path(reid_weights),
                 device=self.device,
@@ -663,14 +658,12 @@ class FaceEngagementAnalyzerWithCallbacks:
             _ensure_valid_stdio()
             _stabilize_loguru_sink()
             tracker = _init_botsort_tracker()
-            self._log("BoT-SORT tracker initialized", "success")
         except Exception as e:
             # Retry once after forcing non-None streams (fixes loguru sink errors).
             try:
                 _ensure_valid_stdio()
                 _stabilize_loguru_sink()
                 tracker = _init_botsort_tracker()
-                self._log("BoT-SORT tracker initialized (retry)", "success")
             except Exception as retry_err:
                 self._log(f"BoT-SORT init failed: {e}", "error")
                 self._log(f"BoT-SORT retry failed: {retry_err}", "error")
@@ -703,7 +696,6 @@ class FaceEngagementAnalyzerWithCallbacks:
             if self._should_stop():
                 break
                 
-            self._log(f"Processing Probe {probe_idx + 1}/{total_probes}")
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
             
             probe_ids_seen = set()
@@ -887,7 +879,7 @@ class FaceEngagementAnalyzerWithCallbacks:
             return ""
         
         # Post-processing & Stitching (matching original)
-        self._log("Running post-processing and stitching...")
+        self._progress(90, "Post-processing…")
         self._progress(92, "Stitching tracks...")
         
         # 1. Export Raw Stitching Index
@@ -926,10 +918,8 @@ class FaceEngagementAnalyzerWithCallbacks:
             probe_corrected_counts[probe['probe_index']] = len(unique_in_probe)
         
         max_students = max(probe_corrected_counts.values()) if probe_corrected_counts else 0
-        self._log(f"Baseline class size: {max_students} students")
         
         # 4. Generate Final Corrected Report
-        self._log("Generating report...")
         self._progress(96, "Generating report...")
         
         final_hourly_report = []

@@ -19,7 +19,8 @@ class PreflightResult:
 
 def _tick(log: LogFn, label: str, ok: bool, *, required: bool = True) -> None:
     level = "success" if ok else ("error" if required else "warning")
-    log(f"{'\u2713' if ok else '\u2717'} {label}", level)
+    mark = "\u2713" if ok else "\u2717"
+    log(f"{mark} {label}", level)
 
 
 def _import_ok(module: str) -> bool:

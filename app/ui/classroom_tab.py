@@ -360,9 +360,6 @@ class ClassroomTab(QWidget):
 
         self.progress_panel.reset()
         self.progress_panel.log_info(f"Processing: {os.path.basename(video_path)}")
-        self.progress_panel.log_video_queue_summary(
-            self._pending_videos, self._current_video
-        )
 
         classroom_config = self.config.get_section("classroom")
         # Propagate the shared ClassRoom Name fallback so it survives VLM failures.

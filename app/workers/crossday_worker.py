@@ -45,8 +45,6 @@ class CrossDayWorker(QThread):
     def run(self):
         """Run the attendance analysis."""
         try:
-            self.log_message.emit("Initializing attendance analysis...", "info")
-            
             try:
                 import torch
                 _ = torch.__version__
@@ -242,27 +240,28 @@ class CrossDayAnalyzerWithCallbacks:
         from ultralytics import YOLO
         
         self._progress(0, "Preparing attendance analysis…")
+
+        from app.runtime_checks import run_crossday_preflight
+
+        preflight = run_crossday_preflight(self._log)
+        if not preflight.ok:
+            raise RuntimeError(
+                "Preflight failed:\n" + "\n".join(preflight.failures)
+            )
         
         # InsightFace + onnxruntime for face-based identity; fallback to simplified (track-only) mode
         face_app = None
         try:
             import onnxruntime as ort
             _ = ort.__version__
-        except (ImportError, OSError) as e:
-            self._log(
-                f"onnxruntime not available ({e}). Using simplified mode (track-only, no face matching).",
-                "warning"
-            )
-            self._log(
-                "To enable face matching: pip uninstall onnxruntime-gpu -y; pip install onnxruntime",
-                "info"
-            )
+        except (ImportError, OSError):
+            pass
         else:
             try:
                 from insightface.app import FaceAnalysis
                 face_app = "pending"  # Will load below
-            except ImportError as e:
-                self._log(f"InsightFace not available ({e}). Using simplified mode.", "warning")
+            except ImportError:
+                pass
         
         # Configuration
         RUN_MODE = self.config.get("run_mode", "BUILD_DB")
@@ -346,16 +345,6 @@ class CrossDayAnalyzerWithCallbacks:
         # Device setup (allow forcing CPU from settings)
         force_cpu = bool((self.config.get("inference") or {}).get("force_cpu", False))
         device = 'cpu' if force_cpu else ('cuda' if torch.cuda.is_available() else 'cpu')
-        if force_cpu:
-            self._log("CPU-only mode enabled from settings")
-        self._log(f"Running on: {device}")
-        self._log(f"Mode: {RUN_MODE}, Date: {CURRENT_DATE}")
-        self._log(
-            f"InsightFace match: strict={T_STRICT_MERGE}, new_id={T_NEW_ID}, margin={T_RATIO_MARGIN}, "
-            f"collect≤{MIN_SAMPLES} emb, match≥{MIN_EMBEDS_FOR_MATCH} emb, post_video≥{MIN_POST_SAMPLES} emb, "
-            f"nf_after≥{NF_MIN_FRAMES} fr (face on)",
-            "info",
-        )
         self._progress(2, "Loading models…")
         
         # 100% match unique_and_recognition.py: hardcode params (ignore config)
@@ -376,7 +365,6 @@ class CrossDayAnalyzerWithCallbacks:
         frame_skip = 1  # Standalone runs face every frame
         
         # Load person detection model (YOLO)
-        self._log("Loading person detection model...")
         person_model = None
         if use_openvino:
             try:
@@ -422,8 +410,6 @@ class CrossDayAnalyzerWithCallbacks:
                 ])
             yolo_weights = resolve_existing_file(yolo_candidates) or "yolov8n.pt"
             person_model = YOLO(yolo_weights)
-        if device == 'cuda':
-            self._log("YOLO using GPU (CUDA)", "success")
         self._progress(6, "Person detection ready")
         
         # FaceAnalysis: load only if onnxruntime + InsightFace available
@@ -444,7 +430,6 @@ class CrossDayAnalyzerWithCallbacks:
                     break
 
         if face_app == "pending":
-            self._log("Loading face analysis model...")
             try:
                 fa_kw = {"name": "buffalo_l"}
                 if face_root:
@@ -471,12 +456,9 @@ class CrossDayAnalyzerWithCallbacks:
                             pass
                     face_app = FaceAnalysis(providers=face_providers, **fa_kw)
                     face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
-                self._log("Face analysis model loaded", "success")
             except Exception as e:
                 self._log(f"Face model failed ({e}), using simplified mode.", "warning")
                 face_app = None
-        if face_app is None:
-            self._log("Running in simplified mode (track-only, no face matching)", "info")
         self._progress(10, "Face pipeline ready")
 
         # Optional OCR model for camera timestamp extraction.
@@ -500,10 +482,8 @@ class CrossDayAnalyzerWithCallbacks:
         try:
             from classroom_analysis.model_weights import resolve_ultralytics_botsort_yaml
             botsort_tracker_yaml = resolve_ultralytics_botsort_yaml()
-            self._log(f"BoT-SORT tracker config: {botsort_tracker_yaml}", "info")
-        except Exception as e:
+        except Exception:
             botsort_tracker_yaml = "botsort.yaml"
-            self._log(f"BoT-SORT tracker config fallback ({e})", "warning")
         try:
             from classroom_analysis.ocr_overlay import (
                 parse_ocr_overlay_datetime,
@@ -534,9 +514,7 @@ class CrossDayAnalyzerWithCallbacks:
         def _load_db(db_path):
             nonlocal global_gallery, operational_dates
             if not db_path or not os.path.exists(db_path):
-                self._log("No existing database found, starting fresh")
                 return
-            self._log(f"Loading database from {db_path}...")
             if db_path.endswith(".db"):
                 try:
                     conn = sqlite3.connect(db_path)
@@ -638,7 +616,6 @@ class CrossDayAnalyzerWithCallbacks:
         
         # Open video
         self._progress(13, "Opening video…")
-        self._log(f"Opening video: {self.video_path}")
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             raise ValueError("Could not open video file")
@@ -647,7 +624,6 @@ class CrossDayAnalyzerWithCallbacks:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         w, h = int(cap.get(3)), int(cap.get(4))
         
-        self._log(f"Video: {total_frames} frames, {fps} FPS, {w}x{h}")
         self._progress(14, f"Processing video ({total_frames} frames)…")
         
         # Motion detection: always OFF for 100% match with unique_and_recognition.py
@@ -1469,7 +1445,6 @@ class CrossDayAnalyzerWithCallbacks:
                 )
         
         # Generate report (unique filename per run so BigQuery sync_log ≠ same basename for every video)
-        self._log("Generating report...")
         self._progress(96, "Generating report...")
         run_folder = os.path.basename(os.path.normpath(self.output_dir))
 
@@ -1647,7 +1622,6 @@ class CrossDayAnalyzerWithCallbacks:
             json.dump(report, f, indent=4)
         
         self._log(f"Report saved: {report_path}", "success")
-        self._log("=== FINAL DAILY SUMMARY ===\n" + json.dumps(report["Counts"], indent=4), "info")
         if save_output_video:
             self._log(f"Output video: {output_video_path}", "success")
         
