@@ -31,10 +31,6 @@ SELECT
   ANY_VALUE(recording_date_str) AS recording_date_str,
   ANY_VALUE(baseline_max_students) AS baseline_max_students,
   ANY_VALUE(report_type) AS report_type,
-  MAX(lecture_sec) AS lecture_sec,
-  MAX(activity_sec) AS activity_sec,
-  MAX(chaos_sec) AS chaos_sec,
-  MAX(break_sec) AS break_sec,
   COUNT(*) AS probe_or_session_row_count,
   AVG(avg_engagement) AS avg_engagement_across_detail_rows,
   AVG(student_count) AS avg_student_count_across_detail_rows
