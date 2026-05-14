@@ -623,10 +623,9 @@ class FaceEngagementAnalyzerWithCallbacks:
         # Tracker init (fp16 only on CUDA - CPU lacks half-precision conv support)
         tracker = None
         def _ensure_valid_stdio():
-            if sys.stdout is None:
-                sys.stdout = open(os.devnull, "w")
-            if sys.stderr is None:
-                sys.stderr = open(os.devnull, "w")
+            from app.frozen_runtime import ensure_valid_stdio
+
+            ensure_valid_stdio()
 
         def _stabilize_loguru_sink():
             try:

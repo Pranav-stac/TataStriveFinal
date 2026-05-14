@@ -215,11 +215,6 @@ ENGAGEMENT_SCHEMA = [
     {"name": "recording_date_str",   "type": "STRING",    "mode": "NULLABLE"},
     {"name": "baseline_max_students","type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "report_type",          "type": "STRING",    "mode": "NULLABLE"},
-    # Event duration summary
-    {"name": "lecture_sec",          "type": "FLOAT",     "mode": "NULLABLE"},
-    {"name": "activity_sec",         "type": "FLOAT",     "mode": "NULLABLE"},
-    {"name": "chaos_sec",            "type": "FLOAT",     "mode": "NULLABLE"},
-    {"name": "break_sec",            "type": "FLOAT",     "mode": "NULLABLE"},
     # Per-probe (one row per probe)
     {"name": "time_slice",           "type": "STRING",    "mode": "NULLABLE"},
     {"name": "video_timestamp_sec",  "type": "FLOAT",     "mode": "NULLABLE"},
@@ -275,6 +270,21 @@ SYNC_LOG_SCHEMA = [
     # Folder-listener: videos still waiting after this sync (auto-sync only; NULL for batch/manual)
     {"name": "videos_in_queue", "type": "INTEGER", "mode": "NULLABLE"},
 ]
+
+_TABLE_INSERT_FIELDS: Dict[str, frozenset[str]] = {
+    ATTENDANCE_TABLE: frozenset(f["name"] for f in ATTENDANCE_SCHEMA),
+    ENGAGEMENT_TABLE: frozenset(f["name"] for f in ENGAGEMENT_SCHEMA),
+    MANAGEMENT_SUMMARY_TABLE: frozenset(f["name"] for f in MANAGEMENT_SUMMARY_SCHEMA),
+    SYNC_LOG_TABLE: frozenset(f["name"] for f in SYNC_LOG_SCHEMA),
+}
+
+
+def _rows_for_table(table_name: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop keys outside the table schema (e.g. legacy probe JSON blobs)."""
+    allowed = _TABLE_INSERT_FIELDS.get(table_name)
+    if not allowed:
+        return rows
+    return [{k: v for k, v in row.items() if k in allowed} for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +761,6 @@ class BigQuerySyncService:
         rdate = self._parse_report_date(data)
         fname = Path(report_path).name
         video_path = data.get("video_path") or data.get("video") or data.get("source_video")
-        dur = data.get("event_duration_summary", {})
         return {
             "center_id":             self.center_id,
             "sync_timestamp":        ts,
@@ -763,10 +772,6 @@ class BigQuerySyncService:
             "baseline_max_students": data.get("baseline_max_students"),
             "report_type":           data.get("report_type"),
             "report_file":           fname,
-            "lecture_sec":           dur.get("Lecture_sec"),
-            "activity_sec":          dur.get("Activity_sec", dur.get("Interactive_sec")),
-            "chaos_sec":             dur.get("Chaos_sec", dur.get("TransitionSparse_sec")),
-            "break_sec":             dur.get("Break_sec"),
         }
 
     def _build_engagement_rows(self, data: Dict, report_path: str) -> List[Dict]:
@@ -810,8 +815,6 @@ class BigQuerySyncService:
     def _build_management_summary_rows(self, data: Dict, report_path: str) -> List[Dict]:
         """One BigQuery row per grouped session in management summary reports."""
         base = self._engagement_report_base(data, report_path)
-        for key in ("lecture_sec", "activity_sec", "chaos_sec", "break_sec"):
-            base.pop(key, None)
 
         sessions = data.get("sessions", [])
         if not sessions:
@@ -847,7 +850,7 @@ class BigQuerySyncService:
             return
         client = self._get_client()
         full_table = f"{self._project_id}.{DATASET_ID}.{table_name}"
-        payload = _json_safe_rows(rows)
+        payload = _json_safe_rows(_rows_for_table(table_name, rows))
         try:
             errors = client.insert_rows_json(full_table, payload)
             if errors:

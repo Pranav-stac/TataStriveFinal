@@ -1,7 +1,7 @@
 """
 Classroom Analysis Tab.
 UI for running classroom engagement analysis.
-Open Settings (Ctrl+,) for preview preferences; analysis defaults are fixed in the app.
+Open Settings (Ctrl+, or the toolbar button) for preview preferences; analysis defaults are fixed in the app.
 """
 
 import os

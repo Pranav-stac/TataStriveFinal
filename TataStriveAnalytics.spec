@@ -1,20 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_submodules
 
-datas = [('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app\\resources', 'resources'), ('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app', 'app'), ('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\classroom_analysis', 'classroom_analysis'), ('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\Models', 'Models'), ('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\.env', '.'), ('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\yolov8n.pt', '.'), ('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\yolov8m.pt', '.'), ('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\yolov8n-pose.pt', '.'), ('e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\osnet_x1_0_msmt17.pt', '.')]
+datas = [('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app\\resources', 'resources'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app', 'app'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\classroom_analysis', 'classroom_analysis'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\Models', 'Models'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\.env', '.'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\yolov8n.pt', '.'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\yolov8m.pt', '.'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\yolov8n-pose.pt', '.'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\osnet_x1_0_msmt17.pt', '.')]
+hiddenimports = ['typing_extensions', 'ultralytics', 'ultralytics.models', 'ultralytics.nn', 'ultralytics.utils', 'onnx', 'omegaconf', 'boxmot', 'lap', 'loguru', 'pkg_resources', 'setuptools', 'gdown', 'insightface', 'onnxruntime', 'scipy.spatial.distance', 'cv2', 'torch', 'torchvision', 'numpy', 'PIL', 'groq', 'dotenv', 'PyQt6', 'PyQt6.QtWidgets', 'PyQt6.QtCore', 'PyQt6.QtGui']
 datas += collect_data_files('boxmot')
 datas += collect_data_files('insightface')
+hiddenimports += collect_submodules('boxmot')
+hiddenimports += collect_submodules('lap')
 
 
 a = Analysis(
-    ['e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app\\main.py'],
+    ['E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\app\\main.py'],
     pathex=['E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\env'],
     binaries=[('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\env\\Lib\\site-packages\\onnxruntime\\capi\\onnxruntime.dll', 'onnxruntime/capi'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\env\\Lib\\site-packages\\onnxruntime\\capi\\onnxruntime_providers_shared.dll', 'onnxruntime/capi'), ('E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\env\\Lib\\site-packages\\onnxruntime\\capi\\onnxruntime_pybind11_state.pyd', 'onnxruntime/capi')],
     datas=datas,
-    hiddenimports=['typing_extensions', 'ultralytics', 'ultralytics.models', 'ultralytics.nn', 'ultralytics.utils', 'onnx', 'omegaconf', 'boxmot', 'insightface', 'onnxruntime', 'scipy.spatial.distance', 'cv2', 'torch', 'torchvision', 'numpy', 'PIL', 'groq', 'dotenv', 'PyQt6', 'PyQt6.QtWidgets', 'PyQt6.QtCore', 'PyQt6.QtGui'],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['e:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\pyi_rth_onnxruntime.py'],
+    runtime_hooks=['E:\\Pranav\\InternshipFreelancing\\TataStriveFinal\\pyi_rth_onnxruntime.py'],
     excludes=['onnx.reference', 'pytest'],
     noarchive=False,
     optimize=0,

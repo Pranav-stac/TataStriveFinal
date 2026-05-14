@@ -23,11 +23,17 @@ def _tick(log: LogFn, label: str, ok: bool, *, required: bool = True) -> None:
     log(f"{mark} {label}", level)
 
 
-def _import_ok(module: str) -> bool:
+def _import_ok(module: str, log: Optional[LogFn] = None) -> bool:
     try:
+        if module == "boxmot":
+            from app.frozen_runtime import ensure_valid_stdio
+
+            ensure_valid_stdio()
         __import__(module)
         return True
-    except Exception:
+    except Exception as exc:
+        if log is not None:
+            log(f"{module} import failed: {exc}", "error")
         return False
 
 
@@ -99,7 +105,7 @@ def run_classroom_preflight(log: LogFn) -> PreflightResult:
         ("ultralytics", "Ultralytics YOLO"),
         ("boxmot", "BoT-SORT tracker (boxmot)"),
     ):
-        ok = _import_ok(module)
+        ok = _import_ok(module, log)
         _tick(log, label, ok)
         if not ok:
             failures.append(label)
@@ -146,7 +152,7 @@ def run_crossday_preflight(log: LogFn) -> PreflightResult:
         ("scipy", "SciPy"),
         ("ultralytics", "Ultralytics YOLO"),
     ):
-        ok = _import_ok(module)
+        ok = _import_ok(module, log)
         _tick(log, label, ok)
         if not ok:
             failures.append(label)

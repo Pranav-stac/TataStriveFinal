@@ -5,6 +5,7 @@ Runs the attendance pipeline in a background thread.
 
 import os
 import sys
+import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -314,21 +315,22 @@ class CrossDayAnalyzerWithCallbacks:
                     return str(c)
             return ""
 
-        student_db_path = str(crossday_cfg.get("student_db_path", "") or "").strip()
-        configured_student_db = student_db_path
-        if student_db_path and not Path(student_db_path).exists():
-            self._log(f"Configured student DB path not found: {student_db_path}", "warning")
-            student_db_path = ""
-            configured_student_db = ""
-        sync_student_enrollments_enabled = bool(crossday_cfg.get("sync_student_enrollments", True))
-        student_sync_path = None
-        if sync_student_enrollments_enabled:
-            if configured_student_db and configured_student_db.lower().endswith(".db"):
-                student_sync_path = Path(configured_student_db)
-            elif not configured_student_db:
-                from app.student_embeddings_sync import default_enrollments_db_path
-                student_sync_path = default_enrollments_db_path(roots)
-        if not student_db_path and not sync_student_enrollments_enabled:
+        configured_student_db = str(crossday_cfg.get("student_db_path", "") or "").strip()
+        from app.config import get_config
+        from app.student_embeddings_sync import resolve_enrollments_db_path
+
+        student_db_target = resolve_enrollments_db_path(configured_student_db)
+        sync_roster_on_run = bool(crossday_cfg.get("sync_student_roster_on_run", True))
+        roster_center = (get_config().get("student_roster_center_name") or "").strip()
+        student_db_path = ""
+        if configured_student_db and Path(configured_student_db).exists():
+            student_db_path = configured_student_db
+        elif student_db_target.is_file():
+            student_db_path = str(student_db_target)
+        elif configured_student_db:
+            self._log(f"Configured student DB path not found: {configured_student_db}", "warning")
+
+        if not student_db_path:
             auto_candidates = []
             for root in roots:
                 auto_candidates.extend([
@@ -342,7 +344,21 @@ class CrossDayAnalyzerWithCallbacks:
                     root / "app" / "Models" / "4batches_student_embeddings.pkl",
                 ])
             student_db_path = resolve_existing_file(auto_candidates)
-        enable_ocr_timestamp = bool(crossday_cfg.get("enable_ocr_timestamp", False))
+
+        if not student_db_path and not student_db_target.is_file():
+            if sync_roster_on_run and roster_center:
+                self._log(
+                    "Student enrollment database not found. "
+                    f"Creating it from the BigQuery roster in the background at {student_db_target}.",
+                    "info",
+                )
+            else:
+                self._log(
+                    "No student enrollment database found. "
+                    f"Set the roster center and prepare the roster in Settings (expected SQLite at {student_db_target}).",
+                    "warning",
+                )
+        enable_ocr_timestamp = bool(crossday_cfg.get("enable_ocr_timestamp", True))
         ocr_interval = max(1, int(crossday_cfg.get("ocr_interval", 30)))
         timestamp_coords = crossday_cfg.get("timestamp_coords", [0, 15, 600, 90])
         if not isinstance(timestamp_coords, (list, tuple)) or len(timestamp_coords) != 4:
@@ -357,11 +373,9 @@ class CrossDayAnalyzerWithCallbacks:
         device = 'cpu' if force_cpu else ('cuda' if torch.cuda.is_available() else 'cpu')
         self._progress(2, "Loading models…")
         
-        # 100% match unique_and_recognition.py: hardcode params (ignore config)
         inference_cfg = self.config.get("inference") or {}
-        use_openvino = False  # Standalone uses PyTorch only
-        enable_motion_detection = False  # Standalone processes all frames
-        enable_ocr_timestamp = True  # Standalone always uses EasyOCR for timestamp
+        use_openvino = bool(inference_cfg.get("use_openvino", device == "cpu")) and device == "cpu"
+        enable_motion_detection = bool(crossday_cfg.get("enable_motion_detection", False))
         if use_openvino:
             try:
                 v = tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2])
@@ -370,9 +384,15 @@ class CrossDayAnalyzerWithCallbacks:
                     self._log("OpenVINO requires torch>=2.1 (you have torch {}). Using PyTorch.".format(torch.__version__.split("+")[0]), "info")
             except Exception:
                 use_openvino = False
-        yolo_imgsz = 640  # Standalone uses 640
-        face_det_size = 640
-        frame_skip = 1  # Standalone runs face every frame
+        yolo_imgsz = int(inference_cfg.get("yolo_imgsz", 416))
+        face_det_size = int(inference_cfg.get("face_det_size", 416))
+        frame_skip = max(1, int(inference_cfg.get("frame_skip", 1)))
+        self._log(
+            f"Inference profile: device={device}, yolo={yolo_imgsz}, face={face_det_size}, "
+            f"face every {frame_skip} frame(s), openvino={use_openvino}, "
+            f"motion={enable_motion_detection}, ocr={enable_ocr_timestamp}",
+            "info",
+        )
         
         # Load person detection model (YOLO)
         person_model = None
@@ -469,16 +489,6 @@ class CrossDayAnalyzerWithCallbacks:
             except Exception as e:
                 self._log(f"Face model failed ({e}), using simplified mode.", "warning")
                 face_app = None
-        if student_sync_path is not None:
-            self._progress(10, "Syncing student roster…")
-            from app.student_embeddings_sync import sync_student_enrollments
-            usable_face_app = face_app if face_app not in (None, "pending") else None
-            sync_student_enrollments(
-                student_sync_path,
-                face_app=usable_face_app,
-                log=self._log,
-                session_once=True,
-            )
         self._progress(10, "Face pipeline ready")
 
         # Optional OCR model for camera timestamp extraction.
@@ -597,40 +607,13 @@ class CrossDayAnalyzerWithCallbacks:
             except ValueError:
                 pass
 
-        if not student_db_path:
-            if student_sync_path is not None and student_sync_path.exists():
-                student_db_path = str(student_sync_path)
-            else:
-                auto_candidates = []
-                for root in roots:
-                    auto_candidates.extend([
-                        root / "student_enrollments.db",
-                        root / "Models" / "student_enrollments.db",
-                        root / "pliswork_4batch_master_db.pkl",
-                        root / "4batches_student_embeddings.pkl",
-                        root / "Models" / "pliswork_4batch_master_db.pkl",
-                        root / "Models" / "4batches_student_embeddings.pkl",
-                        root / "app" / "Models" / "pliswork_4batch_master_db.pkl",
-                        root / "app" / "Models" / "4batches_student_embeddings.pkl",
-                    ])
-                student_db_path = resolve_existing_file(auto_candidates)
-
         if student_db_path:
             if os.path.exists(student_db_path):
                 try:
                     if student_db_path.endswith(".db"):
-                        # ETL-generated SQLite: enrolled_students(engagement_id, batch_name, embedding BLOB)
-                        _conn = sqlite3.connect(student_db_path)
-                        _cur = _conn.cursor()
-                        _cur.execute("SELECT engagement_id, batch_name, embedding FROM enrolled_students")
-                        for _eid, _batch, _blob in _cur.fetchall():
-                            if _blob:
-                                _emb = np.frombuffer(_blob, dtype=np.float32).copy()
-                                student_db[str(_eid)] = {
-                                    "exemplars": [_emb],
-                                    "batch": _batch,
-                                }
-                        _conn.close()
+                        from app.student_embeddings_sync import load_enrolled_student_gallery
+
+                        student_db.update(load_enrolled_student_gallery(Path(student_db_path)))
                     else:
                         with open(student_db_path, 'rb') as f:
                             student_db = pickle.load(f)
@@ -639,6 +622,46 @@ class CrossDayAnalyzerWithCallbacks:
                     self._log(f"Failed to load student DB ({e}). Student mapping disabled.", "warning")
             else:
                 self._log(f"Student DB not found at: {student_db_path}", "warning")
+
+        roster_sync_thread = None
+        roster_sync_result: Dict[str, Any] = {}
+
+        def _reload_student_db_from_target() -> None:
+            nonlocal student_db
+            if not student_db_target.is_file() or not str(student_db_target).endswith(".db"):
+                return
+            try:
+                from app.student_embeddings_sync import load_enrolled_student_gallery
+
+                student_db.clear()
+                student_db.update(load_enrolled_student_gallery(student_db_target))
+            except Exception as exc:
+                self._log(f"Failed to refresh student DB ({exc}).", "warning")
+
+        def _run_background_roster_sync() -> None:
+            from app.student_embeddings_sync import sync_student_enrollments
+
+            result = sync_student_enrollments(
+                student_db_target,
+                log=self._log,
+                log_each_student=False,
+                quiet=True,
+                center_name=roster_center or None,
+            )
+            roster_sync_result["result"] = result
+
+        if sync_roster_on_run and roster_center:
+            roster_sync_thread = threading.Thread(
+                target=_run_background_roster_sync,
+                name="StudentRosterSync",
+                daemon=True,
+            )
+            roster_sync_thread.start()
+        elif sync_roster_on_run and not roster_center:
+            self._log(
+                "BigQuery roster center is not set; skipping incremental student roster sync.",
+                "warning",
+            )
         
         # When OCR supplies the session date, operational_dates are filled from OCR + attendance keys.
         if RUN_MODE == "BUILD_DB" and not enable_ocr_timestamp:
@@ -664,9 +687,7 @@ class CrossDayAnalyzerWithCallbacks:
         
         self._progress(14, f"Processing video ({total_frames} frames)…")
         
-        # Motion detection: always OFF for 100% match with unique_and_recognition.py
         motion_segments = []
-        enable_motion_detection = False
         if enable_motion_detection:
             self._log("Motion detection enabled — scanning video for motion segments...")
             motion_segments = self._detect_motion_segments(
@@ -1445,6 +1466,32 @@ class CrossDayAnalyzerWithCallbacks:
         # during frame processing. Upgrades NF_ → enrolled_student when
         # a confident match exists in the student DB.
         # ---------------------------------------------------------------
+        if roster_sync_thread is not None:
+            roster_sync_thread.join()
+            sync_result = roster_sync_result.get("result")
+            if sync_result and sync_result.ok:
+                _reload_student_db_from_target()
+                if student_db:
+                    self._log(
+                        f"Student enrollment database ready: {len(student_db)} enrolled faces at {student_db_target}.",
+                        "success",
+                    )
+                elif sync_result.processed:
+                    self._log(
+                        f"Student roster sync added/updated {sync_result.processed} student(s) in the background.",
+                        "success",
+                    )
+                else:
+                    self._log(
+                        "Student roster sync finished, but no enrolled students are available for matching.",
+                        "warning",
+                    )
+            elif sync_result and not sync_result.ok:
+                self._log(
+                    f"Student roster sync failed ({sync_result.message}); using the existing student DB.",
+                    "warning",
+                )
+
         if student_db:
             self._log("Running background student match on all face tracks...", "info")
             upgraded_to_student = 0

@@ -82,7 +82,7 @@ SELECT * EXCEPT(rn) FROM (
       PARTITION BY
         center_id,
         report_file,
-        COALESCE(probe_index, ''),
+        COALESCE(time_slice, ''),
         COALESCE(CAST(video_timestamp_sec AS STRING), ''),
         COALESCE(real_world_time, '')
       ORDER BY sync_timestamp DESC
@@ -127,7 +127,7 @@ SELECT COUNT(1) AS c FROM (
         PARTITION BY
           center_id,
           report_file,
-          COALESCE(probe_index, ''),
+          COALESCE(time_slice, ''),
           COALESCE(CAST(video_timestamp_sec AS STRING), ''),
           COALESCE(real_world_time, '')
         ORDER BY sync_timestamp DESC

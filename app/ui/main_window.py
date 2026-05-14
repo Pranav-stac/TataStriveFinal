@@ -12,7 +12,7 @@ from datetime import date
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QStatusBar, QMessageBox, QFileDialog,
-    QLabel, QApplication, QToolBar, QInputDialog
+    QLabel, QApplication, QToolBar, QInputDialog, QStackedWidget,
 )
 from PyQt6.QtCore import Qt, QSize, QMetaObject, Q_ARG, pyqtSlot, QTimer
 from PyQt6.QtGui import QAction, QIcon, QCloseEvent
@@ -22,7 +22,7 @@ from app.config import get_config
 from app.ui.classroom_tab import ClassroomTab
 from app.ui.crossday_tab import CrossDayTab
 from app.ui.report_viewer import ReportViewer
-from app.ui.settings_dialog import SettingsDialog
+from app.ui.settings_tab import SettingsTab
 
 
 class MainWindow(QMainWindow):
@@ -45,8 +45,11 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         """Setup the main UI components."""
         center_id = self.config.get("center_id", "")
+        roster_center = self.config.get("student_roster_center_name", "")
         if center_id:
             title = f"TataStrive Analytics v{__version__}  |  Center: {center_id}"
+        elif roster_center:
+            title = f"TataStrive Analytics v{__version__}  |  Center: {roster_center}"
         else:
             title = f"TataStrive Analytics v{__version__}"
         self.setWindowTitle(title)
@@ -59,7 +62,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Tab widget
+        # Tab widget (analysis + reports only)
         self.tab_widget = QTabWidget()
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
@@ -67,17 +70,23 @@ class MainWindow(QMainWindow):
         self.classroom_tab = ClassroomTab()
         self.crossday_tab  = CrossDayTab()
         self.report_viewer = ReportViewer(config=self.config)
+        self.settings_tab = SettingsTab()
 
         self.tab_widget.addTab(self.classroom_tab, "Classroom Analysis")
         self.tab_widget.addTab(self.crossday_tab,  "Attendance only")
         self.tab_widget.addTab(self.report_viewer, "Report Viewer")
+
+        self._main_page_stack = QStackedWidget()
+        self._main_page_stack.addWidget(self.tab_widget)
+        self._main_page_stack.addWidget(self.settings_tab)
+        self._previous_tab_index = 0
 
         if not self.torch_available:
             self.tab_widget.setTabEnabled(0, False)
             self.tab_widget.setTabEnabled(1, False)
             self.tab_widget.setCurrentIndex(2)
 
-        layout.addWidget(self.tab_widget)
+        layout.addWidget(self._main_page_stack)
 
         # ── Toolbar ──────────────────────────────────────────────────
         toolbar = QToolBar()
@@ -86,7 +95,7 @@ class MainWindow(QMainWindow):
 
         settings_action = QAction("Settings", self)
         settings_action.setShortcut("Ctrl+,")
-        settings_action.setToolTip("Open Settings (Ctrl+,)")
+        settings_action.setToolTip("Open Settings page (Ctrl+,)")
         settings_action.triggered.connect(self._show_settings)
         toolbar.addAction(settings_action)
 
@@ -108,6 +117,8 @@ class MainWindow(QMainWindow):
         # Connect analysis signals
         self.classroom_tab.analysis_complete.connect(self._on_classroom_complete)
         self.crossday_tab.analysis_complete.connect(self._on_crossday_complete)
+        self.settings_tab.settings_saved.connect(self._on_settings_saved)
+        self.settings_tab.back_requested.connect(self._show_analysis)
 
     def _setup_menu(self):
         """Setup the menu bar."""
@@ -155,7 +166,7 @@ class MainWindow(QMainWindow):
 
         report_action = QAction("&Report Viewer", self)
         report_action.setShortcut("Ctrl+3")
-        report_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(2))
+        report_action.triggered.connect(self._show_report_viewer)
         view_menu.addAction(report_action)
 
         # ── BigQuery ──────────────────────────────────────────────────
@@ -168,7 +179,7 @@ class MainWindow(QMainWindow):
 
         bq_menu.addSeparator()
 
-        change_center_action = QAction("Change &Center ID...", self)
+        change_center_action = QAction("Change &Center...", self)
         change_center_action.triggered.connect(self._change_center_id)
         bq_menu.addAction(change_center_action)
 
@@ -196,11 +207,18 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.statusbar)
 
         center_id = self.config.get("center_id", "")
+        roster_center = self.config.get("student_roster_center_name", "")
+        center_text = center_id or roster_center
         base_msg = "Ready" if self.torch_available else "Limited mode: Report Viewer only."
         self.statusbar.showMessage(base_msg)
 
-        # Center ID indicator (permanent, right-side)
-        self._center_label = QLabel(f"  Center: {center_id}  " if center_id else "  Center: (not set)  ")
+        if center_text and roster_center and roster_center != center_text:
+            label = f"  Device: {center_id}  |  Roster: {roster_center}  "
+        elif center_text:
+            label = f"  Center: {center_text}  "
+        else:
+            label = "  Center: (not set)  "
+        self._center_label = QLabel(label)
         self._center_label.setObjectName("centerLabel")
         self.statusbar.addPermanentWidget(self._center_label)
 
@@ -271,20 +289,24 @@ class MainWindow(QMainWindow):
             )
             return
 
-        output_dir = self.config.get("last_output_dir", "")
-        if not output_dir:
+        output_dirs: list[str] = []
+        for key in ("last_output_dir", "last_classroom_output_dir", "last_crossday_output_dir"):
+            d = (self.config.get(key) or "").strip()
+            if d and d not in output_dirs:
+                output_dirs.append(d)
+        if not output_dirs:
             output_dir_chosen = QFileDialog.getExistingDirectory(
                 self, "Select Output Directory to Sync", ""
             )
             if not output_dir_chosen:
                 return
-            output_dir = output_dir_chosen
+            output_dirs = [output_dir_chosen]
 
         self.statusbar.showMessage("⏳ BigQuery sync in progress...")
         self._sync_action.setEnabled(False)
 
         self._bq_service.trigger_daily_sync(
-            output_dirs=[output_dir],
+            output_dirs=output_dirs,
             log_callback=lambda msg: self.statusbar.showMessage(f"[BQ] {msg}"),
             done_callback=self.on_bq_sync_done
         )
@@ -327,6 +349,13 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=_run, daemon=True, name="bq-single-sync")
         t.start()
 
+    def _sync_classroom_reports(self, report_path: str, videos_in_queue: int | None = None):
+        """Push class dynamics and grouped management summary after classroom analysis."""
+        self._sync_single_report(report_path, videos_in_queue=videos_in_queue)
+        mgmt_path = Path(report_path).with_name("management_summary_report.json")
+        if mgmt_path.is_file():
+            self._sync_single_report(str(mgmt_path), videos_in_queue=videos_in_queue)
+
     @pyqtSlot(object)
     def on_bq_sync_done(self, summary: dict):
         """Slot called (from any thread) when a BQ sync completes."""
@@ -356,22 +385,35 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────
 
     def _change_center_id(self):
-        """Allow the operator to rename this device's center ID."""
+        """Update device center_id and BigQuery roster center_name."""
         from app.ui.center_dialog import CenterDialog
+
         current = self.config.get("center_id", "")
-        dlg = CenterDialog(parent=self, existing_name=current)
+        roster_current = self.config.get("student_roster_center_name", "")
+        dlg = CenterDialog(
+            parent=self,
+            existing_name=current,
+            existing_roster_center=roster_current,
+        )
         if dlg.exec():
             new_id = dlg.center_name()
-            if new_id and new_id != current:
-                self.config.set("center_id", new_id)
-                # Reinitialise BQ service with new center_id
-                from app.bigquery_sync import get_sync_service, _creds_path
-                self._bq_service = get_sync_service(new_id, _creds_path())
-                self._center_label.setText(f"  Center: {new_id}  ")
-                self.setWindowTitle(
-                    f"TataStrive Analytics  |  Center: {new_id}"
-                )
-                self.statusbar.showMessage(f"Center ID updated to: {new_id}")
+            new_roster = dlg.roster_center_name()
+            if not new_roster:
+                return
+            changed = new_id != current or new_roster != roster_current
+            if not changed:
+                return
+            self.config.set("center_id", new_id)
+            self.config.set("student_roster_center_name", new_roster)
+            from app.bigquery_sync import get_sync_service, _creds_path
+            self._bq_service = get_sync_service(new_id, _creds_path())
+            if new_roster and new_roster != new_id:
+                label = f"  Device: {new_id}  |  Roster: {new_roster}  "
+            else:
+                label = f"  Center: {new_id}  "
+            self._center_label.setText(label)
+            self.setWindowTitle(f"TataStrive Analytics  |  Center: {new_id}")
+            self.statusbar.showMessage(f"Center updated: roster {new_roster}")
 
     @staticmethod
     def _open_bq_console():
@@ -432,26 +474,41 @@ class MainWindow(QMainWindow):
             "JSON Files (*.json);;All Files (*.*)"
         )
         if file_path:
-            self.tab_widget.setCurrentIndex(2)
+            self._show_report_viewer()
             self.report_viewer.load_report(file_path)
             self.statusbar.showMessage(f"Loaded report: {os.path.basename(file_path)}")
 
     def _show_settings(self):
-        """Show the settings dialog."""
-        dialog = SettingsDialog(self)
-        if dialog.exec():
-            self.statusbar.showMessage("Settings saved")
-            self.classroom_tab.reload_config()
-            self.crossday_tab.reload_config()
+        """Open the full-page settings view."""
+        self._previous_tab_index = self.tab_widget.currentIndex()
+        self.settings_tab.activate()
+        self._main_page_stack.setCurrentWidget(self.settings_tab)
+
+    def _show_analysis(self):
+        """Return to the analysis tab bar."""
+        self._main_page_stack.setCurrentWidget(self.tab_widget)
+        self.tab_widget.setCurrentIndex(self._previous_tab_index)
+
+    def _show_report_viewer(self):
+        """Open Report Viewer from the menu."""
+        self._show_analysis()
+        self.tab_widget.setCurrentWidget(self.report_viewer)
+
+    def _on_settings_saved(self) -> None:
+        self.statusbar.showMessage("Settings saved")
+        self.classroom_tab.reload_config()
+        self.crossday_tab.reload_config()
 
     def _show_about(self):
         """Show the about dialog."""
         center_id = self.config.get("center_id", "N/A")
+        roster_center = self.config.get("student_roster_center_name", "N/A")
         QMessageBox.about(
             self, "About TataStrive Analytics",
             "<h2>TataStrive Analytics</h2>"
             "<p>Version 1.0.0</p>"
-            f"<p><b>Center ID:</b> {center_id}</p>"
+            f"<p><b>Device center ID:</b> {center_id}</p>"
+            f"<p><b>BigQuery roster center:</b> {roster_center}</p>"
             "<p>A professional desktop application for:</p>"
             "<ul>"
             "<li>Classroom engagement analysis</li>"
@@ -470,7 +527,7 @@ class MainWindow(QMainWindow):
         self.statusbar.showMessage(f"Analysis complete: {report_path}")
         # Auto-sync the new report immediately (queue depth for BigQuery sync_log)
         q = self.classroom_tab.pending_video_queue_count()
-        self._sync_single_report(report_path, videos_in_queue=q)
+        self._sync_classroom_reports(report_path, videos_in_queue=q)
         if not self.classroom_tab.is_monitoring():
             reply = QMessageBox.question(
                 self, "Analysis Complete",
@@ -503,6 +560,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent):
         """Handle window close event."""
+        if self.settings_tab.sync_running():
+            QMessageBox.warning(
+                self,
+                "Roster sync running",
+                "Wait for the student enrollment sync to finish before exiting.",
+            )
+            event.ignore()
+            return
         if self.classroom_tab.is_running() or self.crossday_tab.is_running():
             reply = QMessageBox.question(
                 self, "Confirm Exit",

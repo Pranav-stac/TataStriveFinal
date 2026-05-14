@@ -13,7 +13,8 @@ class ConfigManager:
     """Manages application configuration with JSON persistence."""
     
     DEFAULT_CONFIG = {
-        "center_id": "",           # Set on first launch via CenterDialog
+        "center_id": "",           # Device tag on uploaded analytics rows
+        "student_roster_center_name": "",  # BigQuery intraining_students.center_name
         "last_video_path": "",
         "last_video_folder": "",
         "last_output_dir": "",
@@ -62,7 +63,7 @@ class ConfigManager:
             "min_post_samples": 8,
             "max_exemplars": 5,
             "t_outlier": 0.6,
-            "t_match_student": 0.40,
+            "t_match_student": 0.55,
             "t_returning_merge": 0.62,
             "t_track_conflict": 0.50,
             "visitor_upgrade_days": 3,
@@ -70,7 +71,7 @@ class ConfigManager:
             "delete_video_after_processing": False,
             "enable_motion_detection": False,
             "student_db_path": "",
-            "sync_student_enrollments": True,
+            "sync_student_roster_on_run": True,
             "enable_ocr_timestamp": True,
             "ocr_interval": 30,
             "timestamp_coords": [0, 15, 600, 90]
@@ -84,6 +85,16 @@ class ConfigManager:
             "preview_mode": "cv2"
         },
         "preview_enabled": False,
+        "student_roster": {
+            "last_sync_at": "",
+            "roster_total": 0,
+            "processed": 0,
+            "skipped": 0,
+            "no_photo": 0,
+            "no_face": 0,
+            "failed": 0,
+            "db_path": "",
+        },
         "window": {
             "width": 1200,
             "height": 800,
@@ -118,6 +129,7 @@ class ConfigManager:
                 self._config = self._deep_merge(self.DEFAULT_CONFIG.copy(), loaded)
                 self._migrate_crossday_face_defaults()
                 self._migrate_classroom_probe_interval()
+                self._migrate_student_roster_center()
                 # Migrate to match unique_and_recognition.py defaults
                 inf = self._config.get("inference") or {}
                 if inf.get("yolo_imgsz") == 416 or inf.get("face_det_size") == 416:
@@ -164,7 +176,7 @@ class ConfigManager:
             old_rev = int(cd.get("face_match_defaults_revision", 0))
         except (TypeError, ValueError):
             old_rev = 0
-        if old_rev >= 3:
+        if old_rev >= 4:
             return
 
         d = self.DEFAULT_CONFIG["crossday"]
@@ -222,8 +234,17 @@ class ConfigManager:
                 except (TypeError, ValueError):
                     pass
 
-        cd["face_match_defaults_revision"] = 3
-        if changed or old_rev < 3:
+        if old_rev < 4:
+            try:
+                student_match = float(cd.get("t_match_student", d["t_match_student"]))
+            except (TypeError, ValueError):
+                student_match = float(d["t_match_student"])
+            if abs(student_match - 0.40) < 1e-6:
+                cd["t_match_student"] = d["t_match_student"]
+                changed = True
+
+        cd["face_match_defaults_revision"] = 4
+        if changed or old_rev < 4:
             self._save()
 
     def _migrate_classroom_probe_interval(self) -> None:
@@ -246,6 +267,19 @@ class ConfigManager:
         if current == 3600:
             cr["probe_interval"] = 1800
         cr["probe_interval_defaults_revision"] = 1
+        self._save()
+
+    def _migrate_student_roster_center(self) -> None:
+        """Backfill roster center_name from legacy device center_id when possible."""
+        roster = (self._config.get("student_roster_center_name") or "").strip()
+        if roster:
+            return
+        from app.center_catalog import resolve_center_name
+
+        resolved = resolve_center_name(self._config.get("center_id", ""))
+        if not resolved:
+            return
+        self._config["student_roster_center_name"] = resolved
         self._save()
 
     def get(self, key: str, default: Any = None) -> Any:

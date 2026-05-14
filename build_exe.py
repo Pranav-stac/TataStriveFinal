@@ -98,6 +98,21 @@ def get_onnxruntime_binaries():
         return []
 
 
+VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+VC_REDIST_FILENAME = "vc_redist.x64.exe"
+
+
+def ensure_vc_redist_installer(project_root: Path) -> Path:
+    """Download the MSVC redistributable installer for bundling with releases."""
+    dest = project_root / "prerequisites" / VC_REDIST_FILENAME
+    dest.parent.mkdir(exist_ok=True)
+    if not dest.is_file():
+        print(f"Downloading Microsoft VC++ 2015-2022 Redistributable (x64)...")
+        urllib.request.urlretrieve(VC_REDIST_URL, dest)
+        print(f"  Saved to {dest}")
+    return dest
+
+
 def get_vcruntime_binaries():
     """Get VC++ runtime DLLs from Python installation for bundling."""
     binaries = []
@@ -126,6 +141,7 @@ def build():
     print("Ensuring required models...")
     ensure_models(project_root)
     models_dir = project_root / "Models"
+    vc_redist_installer = ensure_vc_redist_installer(project_root)
     
     # Pre-build: ensure onnxruntime (CPU) for reliable bundling - onnxruntime-gpu has different DLLs
     try:
@@ -224,6 +240,8 @@ def build():
     # Bundle boxmot package data (CLIP bpe vocab etc.) so BoTSORT works in frozen app.
     # Fixes: [Errno 2] No such file or directory: '.../boxmot/.../bpe_simple_vocab_16e6.txt.gz'
     args.append("--collect-data=boxmot")
+    args.append("--collect-submodules=boxmot")
+    args.append("--collect-submodules=lap")
 
     # Bundle insightface package data for FaceAnalysis in frozen app.
     # Helps avoid: Face detection failed: 'NoneType' object has no attribute 'shape'
@@ -239,6 +257,11 @@ def build():
         "--hidden-import=onnx",
         "--hidden-import=omegaconf",
         "--hidden-import=boxmot",
+        "--hidden-import=lap",
+        "--hidden-import=loguru",
+        "--hidden-import=pkg_resources",
+        "--hidden-import=setuptools",
+        "--hidden-import=gdown",
         "--hidden-import=insightface",
         "--hidden-import=onnxruntime",
         "--hidden-import=scipy.spatial.distance",
@@ -311,9 +334,13 @@ def build():
         env_dst = dist_dir / "TataStriveAnalytics" / ".env"
         shutil.copy2(env_for_bundle, env_dst)
         print("Copied .env to output folder (from project root .env or .env.example).")
+
+    exe_dir = dist_dir / "TataStriveAnalytics"
+    if vc_redist_installer.is_file():
+        shutil.copy2(vc_redist_installer, exe_dir / VC_REDIST_FILENAME)
+        print(f"Bundled {VC_REDIST_FILENAME} for automatic runtime installation.")
     
     # Create batch files to run the app (cd ensures DLLs load from exe's folder)
-    exe_dir = dist_dir / "TataStriveAnalytics"
     batch_content = '''@echo off
 cd /d "%~dp0"
 set "PATH=%CD%\\_internal;%CD%;%PATH%"
@@ -340,11 +367,9 @@ set "PATH=%CD%\\_internal;%CD%;%PATH%"
     print("Models (yolov8n-face.pt, etc.) are bundled. Detection/pose models")
     print("download automatically on first run.")
     print()
-    print("IMPORTANT: Every target Windows machine MUST have the Microsoft Visual")
-    print("           C++ 2015-2022 Redistributable (x64) installed before running")
-    print("           the .exe. Otherwise PyTorch / onnxruntime fail to load, and")
-    print("           attendance will produce ghost NF entries.")
-    print("           Download: https://aka.ms/vs/17/release/vc_redist.x64.exe")
+    print("IMPORTANT: The bundled vc_redist.x64.exe is offered on first launch when")
+    print("           the MSVC runtime is missing. The Inno Setup installer can also")
+    print("           install it silently during setup.")
 
 
 if __name__ == "__main__":

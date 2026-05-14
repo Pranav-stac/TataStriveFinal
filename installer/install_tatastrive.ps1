@@ -79,6 +79,26 @@ try {
         throw "Installation failed: executable not found at $exePath"
     }
 
+    $vcInstaller = Join-Path $InstallDir "vc_redist.x64.exe"
+    $vcInstalled = $false
+    foreach ($key in @(
+        "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    )) {
+        try {
+            if ((Get-ItemProperty -Path $key -Name Installed -ErrorAction Stop).Installed -eq 1) {
+                $vcInstalled = $true
+                break
+            }
+        } catch {
+        }
+    }
+
+    if (-not $vcInstalled -and (Test-Path $vcInstaller)) {
+        Write-Step "Installing Microsoft Visual C++ 2015-2022 Redistributable (x64)..."
+        Start-Process -FilePath $vcInstaller -ArgumentList "/install", "/passive", "/norestart" -Verb RunAs -Wait
+    }
+
     if (-not $NoShortcut) {
         Write-Step "Creating shortcuts..."
         $desktopPath = [Environment]::GetFolderPath("Desktop")

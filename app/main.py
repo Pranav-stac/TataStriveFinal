@@ -45,6 +45,9 @@ if getattr(sys, "frozen", False):
     sys.path.insert(0, str(project_root))
     if (exe_dir / "app" / "config.py").is_file():
         sys.path.insert(0, str(exe_dir))
+    from app.frozen_runtime import ensure_valid_stdio
+
+    ensure_valid_stdio()
 else:
     sys.path.insert(0, str(project_root))
 
@@ -124,6 +127,11 @@ def main():
     # Create application (needed for message box)
     app = QApplication(sys.argv)
 
+    if getattr(sys, "frozen", False) and os.name == "nt":
+        from app.vcredist import ensure_vc_redist
+
+        ensure_vc_redist()
+
     # Pre-load PyTorch in main thread (avoids DLL issues when loading in worker thread)
     torch_available = False
     try:
@@ -131,21 +139,40 @@ def main():
         _ = torch.__version__
         torch_available = True
     except (OSError, ImportError):
-        reply = QMessageBox.warning(
-            None,
-            "PyTorch Not Available",
-            "PyTorch failed to load (DLL error).\n\n"
-            "Analysis features are disabled. You can still use Report Viewer.\n\n"
-            "To fix: Run in Command Prompt:\n"
-            "  pip uninstall torch torchvision -y\n"
-            "  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu\n\n"
-            "Or install Visual C++ Redistributable:\n"
-            "https://aka.ms/vs/17/release/vc_redist.x64.exe\n\n"
-            "Continue in limited mode?",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
-        )
-        if reply == QMessageBox.StandardButton.Cancel:
-            sys.exit(1)
+        from app.vcredist import VC_REDIST_DOWNLOAD_URL, ensure_vc_redist, find_bundled_installer
+
+        if ensure_vc_redist():
+            try:
+                import torch
+                _ = torch.__version__
+                torch_available = True
+            except (OSError, ImportError):
+                pass
+
+        if not torch_available:
+            if find_bundled_installer() is None:
+                vc_hint = f"Download: {VC_REDIST_DOWNLOAD_URL}\n\n"
+            else:
+                vc_hint = (
+                    "Run vc_redist.x64.exe from the app folder, or choose Install "
+                    "when prompted on the next launch.\n\n"
+                )
+            reply = QMessageBox.warning(
+                None,
+                "PyTorch Not Available",
+                "PyTorch failed to load (DLL error).\n\n"
+                "Most common cause on Windows: Microsoft Visual C++ 2015-2022 "
+                "Redistributable (x64) is missing.\n"
+                f"{vc_hint}"
+                "Analysis features are disabled. You can still use Report Viewer.\n\n"
+                "To fix: Run in Command Prompt:\n"
+                "  pip uninstall torch torchvision -y\n"
+                "  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu\n\n"
+                "Continue in limited mode?",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                sys.exit(1)
 
     app.setApplicationName("TataStrive Analytics")
     app.setApplicationVersion(__version__)
@@ -170,11 +197,21 @@ def main():
 
     cfg = get_config()
     center_id = cfg.get("center_id", "").strip()
+    roster_center = cfg.get("student_roster_center_name", "").strip()
 
-    if not center_id:
-        dlg = CenterDialog(parent=None, existing_name="")
-        dlg.exec()                        # Always accepted (OK button is the only exit)
-        center_id = dlg.center_name() or "DefaultCenter"
+    if not roster_center:
+        dlg = CenterDialog(
+            parent=None,
+            existing_name=center_id,
+            existing_roster_center=roster_center,
+        )
+        dlg.exec()
+        roster_center = dlg.roster_center_name()
+        center_id = dlg.center_name() or roster_center or "DefaultCenter"
+        cfg.set("student_roster_center_name", roster_center)
+        cfg.set("center_id", center_id)
+    elif not center_id:
+        center_id = roster_center
         cfg.set("center_id", center_id)
 
     # ── BigQuery service init ─────────────────────────────────────────────

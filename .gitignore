@@ -19,3 +19,6 @@ bq_summary_output
 docs
 .sqlite
 EXPECTEDOUTPUT
+*.db
+*.sql
+scripts/bigquery_looker_views.sql

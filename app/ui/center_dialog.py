@@ -1,31 +1,29 @@
 """
 Center Setup Dialog.
 
-Shown on first launch (or when center_id is missing from config).
-Asks the operator to enter a Center Name that will tag every BigQuery row
-from this device.
+Captures the BigQuery center_name used for student roster + S3 embeddings,
+and the center_id tag applied to analytics uploaded from this device.
 """
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFrame, QMessageBox
+    QPushButton, QFrame, QMessageBox, QComboBox, QCompleter,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
+from app.center_catalog import TATA_STRIVE_CENTER_NAMES, resolve_center_name
+
 
 class CenterDialog(QDialog):
-    """
-    Modal dialog that captures the center name on first launch.
+    """Modal dialog for device center_id and BigQuery roster center_name."""
 
-    Usage::
-
-        dlg = CenterDialog(parent=None, existing_name="")
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            center_id = dlg.center_name()
-    """
-
-    def __init__(self, parent=None, existing_name: str = ""):
+    def __init__(
+        self,
+        parent=None,
+        existing_name: str = "",
+        existing_roster_center: str = "",
+    ):
         super().__init__(parent)
         self.setWindowTitle("TataStrive Analytics – Center Setup")
         self.setWindowFlags(
@@ -33,20 +31,15 @@ class CenterDialog(QDialog):
             | Qt.WindowType.WindowTitleHint
             | Qt.WindowType.CustomizeWindowHint
         )
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
         self.setModal(True)
-        self._setup_ui(existing_name)
+        self._setup_ui(existing_name, existing_roster_center)
 
-    # ------------------------------------------------------------------
-    # UI
-    # ------------------------------------------------------------------
-
-    def _setup_ui(self, existing_name: str) -> None:
+    def _setup_ui(self, existing_name: str, existing_roster_center: str) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 28, 32, 24)
         layout.setSpacing(18)
 
-        # ── Header ────────────────────────────────────────────────────
         header_label = QLabel("Welcome to TataStrive Analytics")
         hfont = QFont()
         hfont.setPointSize(14)
@@ -55,39 +48,61 @@ class CenterDialog(QDialog):
         header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(header_label)
 
-        # Divider
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
         divider.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(divider)
 
-        # ── Info text ─────────────────────────────────────────────────
         info_label = QLabel(
-            "Please enter the name of this center / location.\n\n"
-            "This value is used to identify all data uploaded from this\n"
-            "device to the central BigQuery database, so every report\n"
-            "will be tagged with this Center ID.\n\n"
-            "You can change this later from Settings."
+            "Choose the Tata STRIVE center for the student roster in BigQuery.\n\n"
+            "That center_name drives engagement_id lookup, S3 enrollment photos,\n"
+            "and face matching during attendance.\n\n"
+            "Reports uploaded from this device are tagged with the device center ID."
         )
         info_label.setWordWrap(True)
         info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(info_label)
 
-        # ── Input ─────────────────────────────────────────────────────
-        input_layout = QHBoxLayout()
-        center_label = QLabel("Center Name:")
-        center_label.setMinimumWidth(110)
-        input_layout.addWidget(center_label)
+        roster_layout = QHBoxLayout()
+        roster_label = QLabel("BigQuery center:")
+        roster_label.setMinimumWidth(130)
+        roster_layout.addWidget(roster_label)
 
-        self._name_edit = QLineEdit()
-        self._name_edit.setPlaceholderText("e.g.  Mumbai_Center_01")
-        self._name_edit.setText(existing_name)
-        self._name_edit.setMinimumHeight(34)
-        self._name_edit.returnPressed.connect(self._accept)
-        input_layout.addWidget(self._name_edit)
-        layout.addLayout(input_layout)
+        self._roster_combo = QComboBox()
+        self._roster_combo.addItems(TATA_STRIVE_CENTER_NAMES)
+        self._roster_combo.setEditable(True)
+        self._roster_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._roster_combo.setMinimumHeight(34)
+        completer = self._roster_combo.completer()
+        if completer is not None:
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
 
-        hint = QLabel("Tip: Use letters, numbers, or underscores only (no spaces).")
+        roster_seed = resolve_center_name(existing_roster_center) or resolve_center_name(existing_name)
+        if roster_seed:
+            idx = self._roster_combo.findText(roster_seed, Qt.MatchFlag.MatchExactly)
+            if idx >= 0:
+                self._roster_combo.setCurrentIndex(idx)
+            else:
+                self._roster_combo.setEditText(roster_seed)
+        roster_layout.addWidget(self._roster_combo)
+        layout.addLayout(roster_layout)
+
+        device_layout = QHBoxLayout()
+        device_label = QLabel("Device center ID:")
+        device_label.setMinimumWidth(130)
+        device_layout.addWidget(device_label)
+
+        self._device_edit = QLineEdit()
+        self._device_edit.setPlaceholderText("Defaults to the selected BigQuery center")
+        self._device_edit.setText(existing_name.strip())
+        self._device_edit.setMinimumHeight(34)
+        self._device_edit.returnPressed.connect(self._accept)
+        device_layout.addWidget(self._device_edit)
+        layout.addLayout(device_layout)
+
+        hint = QLabel("Type to search the center list. Pick a catalog center before continuing.")
         hint.setObjectName("hintLabel")
         hint_font = QFont()
         hint_font.setPointSize(9)
@@ -96,7 +111,6 @@ class CenterDialog(QDialog):
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(hint)
 
-        # ── Buttons ───────────────────────────────────────────────────
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
@@ -108,31 +122,26 @@ class CenterDialog(QDialog):
         btn_layout.addWidget(self._ok_btn)
 
         layout.addLayout(btn_layout)
-        self._name_edit.setFocus()
-
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
+        self._roster_combo.setFocus()
 
     def _accept(self) -> None:
-        name = self._name_edit.text().strip()
-        if not name:
+        roster = resolve_center_name(self._roster_combo.currentText())
+        if not roster:
             QMessageBox.warning(
                 self,
-                "Center Name Required",
-                "Please enter a center name before continuing."
+                "Center Required",
+                "Choose one of the Tata STRIVE centers from the list.",
             )
             return
-        # Sanitise: replace spaces with underscores
-        sanitised = name.replace(" ", "_")
-        if sanitised != name:
-            self._name_edit.setText(sanitised)
+        device = self._device_edit.text().strip() or roster
+        self._roster_combo.setCurrentText(roster)
+        self._device_edit.setText(device)
         self.accept()
 
-    # ------------------------------------------------------------------
-    # Result
-    # ------------------------------------------------------------------
-
     def center_name(self) -> str:
-        """Return the entered (sanitised) center name."""
-        return self._name_edit.text().strip().replace(" ", "_")
+        """Device center_id used on uploaded analytics rows."""
+        return self._device_edit.text().strip() or self.roster_center_name()
+
+    def roster_center_name(self) -> str:
+        """BigQuery center_name for intraining_students roster scope."""
+        return resolve_center_name(self._roster_combo.currentText()) or ""

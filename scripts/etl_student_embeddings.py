@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -36,12 +37,24 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Preview only — no downloads, no DB writes")
     parser.add_argument("--force-all", action="store_true", help="Re-embed all students even if photo is unchanged")
+    parser.add_argument("--center-id", default="", help="BigQuery center_id filter (intraining_students.center_id)")
+    parser.add_argument("--center-name", default="", help="BigQuery center_name filter (matches app center_id by default)")
+    parser.add_argument(
+        "--status",
+        default="",
+        help="Optional student_engagement_status filter (omit for all statuses at the center)",
+    )
     args = parser.parse_args()
+
+    if args.status.strip():
+        os.environ["STUDENT_ROSTER_STATUS"] = args.status.strip()
 
     result = sync_student_enrollments(
         args.out,
         dry_run=args.dry_run,
         force_all=args.force_all,
+        center_id=args.center_id.strip() or None,
+        center_name=args.center_name.strip() or None,
     )
     if not result.ok:
         print(f"[ETL] Sync failed: {result.message}")
