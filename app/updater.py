@@ -39,8 +39,9 @@ import sys
 import tempfile
 import threading
 import zipfile
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.request import Request, urlopen
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,9 +55,8 @@ DOWNLOAD_TIMEOUT     = 180   # seconds – patch ZIP download
 # Polling interval while the app is running (minutes). Set back to 60 for production.
 DEFAULT_POLL_INTERVAL_MINUTES = 1
 
-# How long to wait after startup before the first check (gives the app time
-# to finish loading before hitting the network).
-STARTUP_DELAY_SECONDS = 20
+# Legacy: poll loop now checks immediately; kept for compatibility.
+STARTUP_DELAY_SECONDS = 3
 
 def get_patch_root() -> Path:
     """
@@ -71,6 +71,18 @@ def get_patch_root() -> Path:
 
 
 PATCH_ROOT = get_patch_root()
+
+
+def _update_log(msg: str) -> None:
+    """Print and append to update.log next to the exe (visible when windowed)."""
+    line = f"[Updater] {msg}"
+    print(line)
+    try:
+        log_path = get_patch_root() / "update.log"
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+    except OSError:
+        pass
 
 
 def _local_file_path(rel: str) -> Path:
@@ -144,7 +156,7 @@ def _get_json(url: str, timeout: int = UPDATE_CHECK_TIMEOUT) -> Optional[Dict]:
         with urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        print(f"[Updater] fetch error: {exc}")
+        _update_log(f"fetch error: {exc}")
         return None
 
 
@@ -171,17 +183,19 @@ def _download_file(
                         progress_cb(done, total)
         return True
     except Exception as exc:
-        print(f"[Updater] download error: {exc}")
+        _update_log(f"download error: {exc}")
         return False
 
 
+def _parse_version(v: str) -> Tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.strip().lstrip("v").split("."))
+    except ValueError:
+        return (0,)
+
+
 def _is_newer(remote: str, current: str) -> bool:
-    def _parse(v: str):
-        try:
-            return tuple(int(x) for x in v.strip().lstrip("v").split("."))
-        except ValueError:
-            return (0,)
-    return _parse(remote) > _parse(current)
+    return _parse_version(remote) > _parse_version(current)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,10 +280,8 @@ class UpdateChecker:
             name="TataStriveUpdatePoller",
         )
         self._poll_thread.start()
-        print(
-            f"[Updater] Polling started — "
-            f"first check in {STARTUP_DELAY_SECONDS}s, "
-            f"then every {self.poll_interval // 60} min"
+        _update_log(
+            f"Polling started — check now, then every {max(1, self.poll_interval // 60)} min"
         )
 
     def stop_polling(self) -> None:
@@ -317,19 +329,13 @@ class UpdateChecker:
     # ── Background workers ────────────────────────────────────────────────────
 
     def _poll_loop(self) -> None:
-        """
-        Daemon thread body.
-        Sleeps for STARTUP_DELAY_SECONDS, then checks every poll_interval.
-        Uses threading.Event.wait() so stop_polling() wakes it immediately.
-        """
-        # Initial startup delay — don't hammer the network before the UI loads
+        """Daemon thread: check immediately, then every poll_interval."""
         if self._stop_event.wait(timeout=STARTUP_DELAY_SECONDS):
-            return  # stop was requested during startup delay
-
+            return
         while not self._stop_event.is_set():
             self._run_single_check()
-            # Sleep in small increments so stop_polling() is responsive
-            self._stop_event.wait(timeout=self.poll_interval)
+            if self._stop_event.wait(timeout=self.poll_interval):
+                break
 
     def _run_single_check(self) -> None:
         try:
@@ -360,9 +366,8 @@ class UpdateChecker:
                 return
             self._apply_in_progress = True
 
-        print(
-            f"[Updater] New version v{info.version} available — "
-            f"downloading and installing automatically ({len(info.changed_files)} file(s))…"
+        _update_log(
+            f"Update v{info.version} — downloading {len(info.changed_files)} file(s)…"
         )
         self.download_and_apply(info, done_cb=self._silent_apply_done)
 
@@ -371,10 +376,10 @@ class UpdateChecker:
             self._apply_in_progress = False
 
         if success:
-            print(f"[Updater] {message} Restarting…")
+            _update_log(f"{message} Restarting…")
             self.restart_app()
         else:
-            print(f"[Updater] Automatic update failed — will retry on next poll: {message}")
+            _update_log(f"Automatic update failed — will retry: {message}")
 
     def _fetch_latest_info(self) -> Optional[UpdateInfo]:
         url  = f"{GITHUB_API}/repos/{self.repo}/releases/latest"
@@ -383,9 +388,6 @@ class UpdateChecker:
             return None
 
         remote_ver = data["tag_name"].lstrip("v")
-        if not _is_newer(remote_ver, self.current_version):
-            print(f"[Updater] Up to date (local={self.current_version}, remote={remote_ver})")
-            return None
 
         assets = {
             a["name"]: a["browser_download_url"]
@@ -395,14 +397,14 @@ class UpdateChecker:
         patch_url    = assets.get("patch.zip")
 
         if not manifest_url or not patch_url:
-            print("[Updater] Release assets incomplete — skipping.")
+            _update_log("Release assets incomplete (need manifest.json + patch.zip).")
             return None
 
         manifest = _get_json(manifest_url)
         if not manifest:
             return None
 
-        # Compute true delta: skip files whose local hash already matches
+        # Compute delta vs bundled/overlay files (not just version string).
         changed_entries = []
         for entry in manifest.get("files", []):
             lp = _local_file_path(entry["path"])
@@ -410,8 +412,22 @@ class UpdateChecker:
                 changed_entries.append(entry)
 
         if not changed_entries:
-            print("[Updater] Remote version newer but all local files already match.")
+            _update_log(
+                f"Up to date (local=v{self.current_version}, remote=v{remote_ver}, files match)."
+            )
             return None
+
+        if _parse_version(remote_ver) < _parse_version(self.current_version):
+            _update_log(
+                f"Skipping older release v{remote_ver} (local v{self.current_version})."
+            )
+            return None
+
+        if not _is_newer(remote_ver, self.current_version):
+            _update_log(
+                f"Hotfix: v{self.current_version} -> v{remote_ver} "
+                f"({len(changed_entries)} file(s) differ)."
+            )
 
         return UpdateInfo(
             version=remote_ver,
@@ -473,9 +489,9 @@ class UpdateChecker:
                             dest = PATCH_ROOT / rel
                             dest.parent.mkdir(parents=True, exist_ok=True)
                             dest.write_bytes(src.read_bytes())
-                print("[Updater] Rollback complete.")
+                _update_log("Rollback complete.")
             except Exception as rb_exc:
-                print(f"[Updater] Rollback failed: {rb_exc}")
+                _update_log(f"Rollback failed: {rb_exc}")
 
             if done_cb:
                 done_cb(False, f"Update failed: {exc}")

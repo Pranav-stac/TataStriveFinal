@@ -43,7 +43,13 @@ if getattr(sys, "frozen", False):
     _merge_partial_app_overlay_from_bundle()
     exe_dir = Path(sys.executable).resolve().parent
     sys.path.insert(0, str(project_root))
-    if (exe_dir / "app" / "config.py").is_file():
+    # Prefer patched sources next to the exe (app/ and/or classroom_analysis/).
+    overlay_markers = (
+        exe_dir / "app" / "config.py",
+        exe_dir / "app" / "__init__.py",
+        exe_dir / "classroom_analysis" / "ocr_overlay.py",
+    )
+    if any(p.is_file() for p in overlay_markers):
         sys.path.insert(0, str(exe_dir))
     from app.frozen_runtime import ensure_valid_stdio
 
@@ -265,6 +271,8 @@ def _start_update_polling(window, app) -> None:
 
     app.aboutToQuit.connect(checker.stop_polling)
     checker.start_polling()
+    # First check soon after UI loads (do not wait for the full poll interval).
+    checker.check_once_async()
 
     window._update_checker = checker
 
