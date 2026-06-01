@@ -172,10 +172,31 @@ def run_crossday_preflight(log: LogFn) -> PreflightResult:
     if not botsort_ok:
         failures.append("BoT-SORT tracker config")
 
-    ort_ok = _import_ok("onnxruntime")
-    _tick(log, "ONNX Runtime", ort_ok, required=False)
+    if getattr(sys, "frozen", False):
+        from app.frozen_runtime import configure_frozen_dll_paths, ensure_onnxruntime_loaded
 
-    insight_ok = _import_ok("insightface")
+        configure_frozen_dll_paths()
+        ort_ok, ort_err = ensure_onnxruntime_loaded()
+        if not ort_ok and log is not None:
+            log(f"onnxruntime load failed: {ort_err}", "error")
+    else:
+        ort_ok = _import_ok("onnxruntime")
+    _tick(log, "ONNX Runtime", ort_ok, required=False)
+    if not ort_ok:
+        log(
+            "Face matching needs ONNX Runtime. Install vc_redist.x64.exe and use Run_TataStrive.bat.",
+            "warning",
+        )
+
+    insight_ok = False
+    if ort_ok:
+        try:
+            from insightface.app import FaceAnalysis  # noqa: F401
+
+            insight_ok = True
+        except Exception as exc:
+            if log is not None:
+                log(f"InsightFace load failed: {exc}", "error")
     _tick(log, "InsightFace", insight_ok, required=False)
 
     _tick(log, "Face model bundle (buffalo_l)", _face_model_ready(), required=False)

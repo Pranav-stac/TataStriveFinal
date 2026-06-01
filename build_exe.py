@@ -75,27 +75,46 @@ def ensure_models(project_root: Path) -> bool:
 
 def get_onnxruntime_binaries():
     """
-    Get onnxruntime DLLs/pyd for bundling.
-    IMPORTANT: For maximum compatibility we bundle CPU-only essentials and
-    skip GPU provider DLLs (CUDA/TensorRT) that often fail on CPU machines.
+    Bundle all onnxruntime native libs (PyInstaller hook + manual capi copy).
+    Dest paths are relative to the onedir bundle root (_internal/), not exe_dir/_internal.
     """
+    binaries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(src: str, dest: str) -> None:
+        key = f"{dest}|{Path(src).name.lower()}"
+        if key in seen:
+            return
+        seen.add(key)
+        binaries.append((src, dest))
+
+    try:
+        from PyInstaller.utils.hooks import collect_dynamic_libs
+
+        for src, dest in collect_dynamic_libs("onnxruntime"):
+            name = Path(src).name.lower()
+            if "providers_cuda" in name or "providers_tensorrt" in name:
+                continue
+            _add(src, dest)
+    except Exception:
+        pass
+
     try:
         import onnxruntime as ort
-        ort_dir = Path(ort.__file__).parent / "capi"
-        if not ort_dir.exists():
-            return []
-        binaries = []
-        for f in ort_dir.iterdir():
-            if f.suffix in (".dll", ".pyd"):
-                name = f.name.lower()
-                # Skip GPU provider binaries for CPU-first deployments
-                if "providers_cuda" in name or "providers_tensorrt" in name:
-                    continue
-                # Dest: onnxruntime/capi/ so package finds them when frozen
-                binaries.append((str(f), "onnxruntime/capi"))
-        return binaries
+
+        capi_dir = Path(ort.__file__).parent / "capi"
+        for f in capi_dir.iterdir():
+            if f.suffix not in (".dll", ".pyd"):
+                continue
+            name = f.name.lower()
+            if "providers_cuda" in name or "providers_tensorrt" in name:
+                continue
+            _add(str(f), "onnxruntime/capi")
+            if f.suffix == ".dll":
+                _add(str(f), ".")
     except ImportError:
-        return []
+        pass
+    return binaries
 
 
 VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
@@ -225,7 +244,9 @@ def build():
     for src, dest in ort_binaries:
         args.append(f"--add-binary={src};{dest}")
     if ort_binaries:
-        print("Bundling onnxruntime DLLs for face matching...")
+        print(f"Bundling {len(ort_binaries)} onnxruntime binary entries for face matching...")
+    else:
+        print("WARNING: No onnxruntime DLLs found — face matching will fail in the .exe!")
     
     # Add VC++ runtime DLLs (onnxruntime depends on these)
     vcrt_binaries = get_vcruntime_binaries()
@@ -264,6 +285,7 @@ def build():
         "--hidden-import=gdown",
         "--hidden-import=insightface",
         "--hidden-import=onnxruntime",
+        "--collect-submodules=onnxruntime",
         "--hidden-import=scipy.spatial.distance",
         "--hidden-import=cv2",
         "--hidden-import=torch",
@@ -336,6 +358,17 @@ def build():
         print("Copied .env to output folder (from project root .env or .env.example).")
 
     exe_dir = dist_dir / "TataStriveAnalytics"
+    internal = exe_dir / "_internal"
+    ort_dll = internal / "onnxruntime" / "capi" / "onnxruntime.dll"
+    ort_pyd = internal / "onnxruntime" / "capi" / "onnxruntime_pybind11_state.pyd"
+    if ort_dll.is_file() and ort_pyd.is_file():
+        print("Verified onnxruntime bundled under _internal/onnxruntime/capi/")
+    else:
+        print(
+            "WARNING: onnxruntime DLLs missing in dist! "
+            f"Expected: {ort_dll} and {ort_pyd}"
+        )
+
     if vc_redist_installer.is_file():
         shutil.copy2(vc_redist_installer, exe_dir / VC_REDIST_FILENAME)
         print(f"Bundled {VC_REDIST_FILENAME} for automatic runtime installation.")
@@ -367,6 +400,9 @@ set "PATH=%CD%\\_internal;%CD%;%PATH%"
     print("Models (yolov8n-face.pt, etc.) are bundled. Detection/pose models")
     print("download automatically on first run.")
     print()
+    print("IMPORTANT: Copy the ENTIRE TataStriveAnalytics folder to the target PC.")
+    print("           Do not copy only TataStriveAnalytics.exe.")
+    print("           Use Run_TataStrive.bat on first run (sets PATH for DLLs).")
     print("IMPORTANT: The bundled vc_redist.x64.exe is offered on first launch when")
     print("           the MSVC runtime is missing. The Inno Setup installer can also")
     print("           install it silently during setup.")

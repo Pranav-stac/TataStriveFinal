@@ -69,28 +69,11 @@ _load_env()
 # Version string for About / updater (reads app/__init__.py from overlay when patched)
 from app import __version__
 
-# When frozen (PyInstaller): add DLL search paths so onnxruntime and its deps are found
-# (Works from source; fails in exe due to different DLL search order / VC++ runtime)
-if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-    _base = Path(sys._MEIPASS)  # _internal/ for PyInstaller 6 onedir
-    _dll_dirs = [str(_base), str(_base / "onnxruntime" / "capi")]
-    # Prepend to PATH (older method, broader compatibility)
-    _existing_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = ";".join(_dll_dirs) + ";" + _existing_path
-    # Also use add_dll_directory (modern method)
-    for _dll_dir in _dll_dirs:
-        if Path(_dll_dir).exists():
-            try:
-                os.add_dll_directory(_dll_dir)
-            except (OSError, AttributeError):
-                pass
+# Frozen exe: register DLL directories early (import happens after VC++ in main()).
+if getattr(sys, "frozen", False):
+    from app.frozen_runtime import configure_frozen_dll_paths
 
-# Load onnxruntime as early as possible (before PyTorch/PyQt) - DLL order matters on Windows
-try:
-    import onnxruntime as _ort
-    _ = _ort.__version__
-except (OSError, ImportError):
-    pass
+    configure_frozen_dll_paths()
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt, QFile, QTextStream
@@ -131,6 +114,22 @@ def main():
         from app.vcredist import ensure_vc_redist
 
         ensure_vc_redist()
+
+    # After VC++ runtime: load onnxruntime before PyTorch (DLL order on Windows).
+    if getattr(sys, "frozen", False):
+        from app.frozen_runtime import ensure_onnxruntime_loaded
+
+        ort_ok, ort_err = ensure_onnxruntime_loaded()
+        if not ort_ok:
+            QMessageBox.warning(
+                None,
+                "Face matching unavailable",
+                "ONNX Runtime could not load. Attendance will run without InsightFace "
+                "(no student ID photos / weaker identity matching).\n\n"
+                f"{ort_err}\n\n"
+                "Fix: run vc_redist.x64.exe from this folder, use Run_TataStrive.bat, "
+                "and copy the full TataStriveAnalytics folder (not only the .exe).",
+            )
 
     # Pre-load PyTorch in main thread (avoids DLL issues when loading in worker thread)
     torch_available = False

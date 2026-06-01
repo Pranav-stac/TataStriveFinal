@@ -52,10 +52,10 @@ class ConfigManager:
             "classroom_name": "",
         },
         "crossday": {
-            # Strict baseline face-gallery thresholds
-            "t_strict_merge": 0.55,
+            # Aligned with Kaggle notebook (cross-day eval / max-to-max student map)
+            "t_strict_merge": 0.45,
             "t_new_id": 0.35,
-            "t_ratio_margin": 0.10,
+            "t_ratio_margin": 0.05,
             # With face pipeline on, wait this many frames before NF_* (gives InsightFace time to crop)
             "nf_min_frames_before_label": 12,
             "min_samples": 8,
@@ -63,7 +63,7 @@ class ConfigManager:
             "min_post_samples": 8,
             "max_exemplars": 5,
             "t_outlier": 0.6,
-            "t_match_student": 0.55,
+            "t_match_student": 0.40,
             "t_returning_merge": 0.62,
             "t_track_conflict": 0.50,
             "visitor_upgrade_days": 3,
@@ -74,7 +74,9 @@ class ConfigManager:
             "sync_student_roster_on_run": True,
             "enable_ocr_timestamp": True,
             "ocr_interval": 30,
-            "timestamp_coords": [0, 15, 600, 90]
+            "timestamp_coords": [0, 15, 600, 90],
+            # Attendance main-loop [Timing] window: log per-frame averages every N processed frames.
+            "timing_log_interval_frames": 500,
         },
         "inference": {
             "use_openvino": False,  # PyTorch by default = same as unique_and_recognition.py
@@ -176,7 +178,7 @@ class ConfigManager:
             old_rev = int(cd.get("face_match_defaults_revision", 0))
         except (TypeError, ValueError):
             old_rev = 0
-        if old_rev >= 4:
+        if old_rev >= 5:
             return
 
         d = self.DEFAULT_CONFIG["crossday"]
@@ -243,8 +245,23 @@ class ConfigManager:
                 cd["t_match_student"] = d["t_match_student"]
                 changed = True
 
-        cd["face_match_defaults_revision"] = 4
-        if changed or old_rev < 4:
+        if old_rev < 5:
+            kaggle_defaults = {
+                "t_strict_merge": (0.55, 0.36),
+                "t_match_student": (0.55,),
+                "t_ratio_margin": (0.10,),
+            }
+            for key, old_vals in kaggle_defaults.items():
+                try:
+                    current = float(cd.get(key, d[key]))
+                except (TypeError, ValueError):
+                    continue
+                if any(abs(current - float(v)) < 1e-6 for v in old_vals):
+                    cd[key] = d[key]
+                    changed = True
+
+        cd["face_match_defaults_revision"] = 5
+        if changed or old_rev < 5:
             self._save()
 
     def _migrate_classroom_probe_interval(self) -> None:

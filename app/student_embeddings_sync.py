@@ -359,6 +359,13 @@ def download_s3_image(s3, key: str, dest: str, log: Optional[LogCallback] = None
 
 
 def _load_face_app(log: Optional[LogCallback] = None):
+    from app.frozen_runtime import ensure_onnxruntime_loaded, insightface_providers
+
+    ort_ok, ort_err = ensure_onnxruntime_loaded()
+    if not ort_ok:
+        _emit(log, f"insightface / opencv not available: {ort_err}", "error")
+        return None
+
     try:
         import cv2  # noqa: F401
         from insightface.app import FaceAnalysis
@@ -366,15 +373,12 @@ def _load_face_app(log: Optional[LogCallback] = None):
         _emit(log, f"insightface / opencv not available: {exc}", "error")
         return None
 
-    import torch
-
-    providers = (
-        ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        if torch.cuda.is_available()
-        else ["CPUExecutionProvider"]
-    )
+    providers = insightface_providers()
     root = Path(__file__).resolve().parent.parent
-    for model_root in (root, root / "Models", Path(sys.executable).parent):
+    model_roots = [root, root / "Models", Path(sys.executable).resolve().parent]
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        model_roots.insert(0, Path(sys._MEIPASS))
+    for model_root in model_roots:
         if (model_root / "models" / "buffalo_l").exists():
             face_app = FaceAnalysis(name="buffalo_l", root=str(model_root), providers=providers)
             face_app.prepare(ctx_id=0, det_size=DET_SIZE)

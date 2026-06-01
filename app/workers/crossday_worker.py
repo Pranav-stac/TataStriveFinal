@@ -252,15 +252,14 @@ class CrossDayAnalyzerWithCallbacks:
         
         # InsightFace + onnxruntime for face-based identity; fallback to simplified (track-only) mode
         face_app = None
-        try:
-            import onnxruntime as ort
-            _ = ort.__version__
-        except (ImportError, OSError):
-            pass
-        else:
+        from app.frozen_runtime import ensure_onnxruntime_loaded
+
+        ort_ok, _ort_err = ensure_onnxruntime_loaded()
+        if ort_ok:
             try:
-                from insightface.app import FaceAnalysis
-                face_app = "pending"  # Will load below
+                from insightface.app import FaceAnalysis  # noqa: F401
+
+                face_app = "pending"  # Loaded below with buffalo_l
             except ImportError:
                 pass
         
@@ -270,7 +269,7 @@ class CrossDayAnalyzerWithCallbacks:
         DAY_LABEL = self.config.get("day_label", "Day1")
 
         crossday_cfg = self.config.get("crossday") or {}
-        T_STRICT_MERGE = float(crossday_cfg.get("t_strict_merge", 0.55))
+        T_STRICT_MERGE = float(crossday_cfg.get("t_strict_merge", 0.45))
         T_NEW_ID = float(crossday_cfg.get("t_new_id", 0.35))
         T_RATIO_MARGIN = float(crossday_cfg.get("t_ratio_margin", 0.10))
         NF_MIN_FRAMES = max(5, int(crossday_cfg.get("nf_min_frames_before_label", 12)))
@@ -461,31 +460,26 @@ class CrossDayAnalyzerWithCallbacks:
 
         if face_app == "pending":
             try:
+                from app.frozen_runtime import ensure_onnxruntime_loaded, insightface_providers
+
+                ort_ok, ort_err = ensure_onnxruntime_loaded()
+                if not ort_ok:
+                    raise RuntimeError(ort_err or "onnxruntime unavailable")
+
                 fa_kw = {"name": "buffalo_l"}
                 if face_root:
                     fa_kw["root"] = face_root
-                if device == 'cuda':
+                face_providers = insightface_providers()
+                if use_openvino and not getattr(sys, "frozen", False):
                     try:
-                        face_app = FaceAnalysis(
-                            providers=['CUDAExecutionProvider', 'CPUExecutionProvider'],
-                            **fa_kw
-                        )
-                        face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
-                    except Exception as e:
-                        self._log(f"CUDA failed ({e}), falling back to CPU...", "warning")
-                        face_app = None
-                if face_app is None or face_app == "pending":
-                    face_providers = ['CPUExecutionProvider']
-                    if use_openvino:
-                        try:
-                            import onnxruntime as _ort
-                            if 'OpenVINOExecutionProvider' in _ort.get_available_providers():
-                                face_providers = ['OpenVINOExecutionProvider', 'CPUExecutionProvider']
-                                self._log("Using OpenVINO for face detection", "info")
-                        except Exception:
-                            pass
-                    face_app = FaceAnalysis(providers=face_providers, **fa_kw)
-                    face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
+                        import onnxruntime as _ort
+                        if "OpenVINOExecutionProvider" in _ort.get_available_providers():
+                            face_providers = ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+                            self._log("Using OpenVINO for face detection", "info")
+                    except Exception:
+                        pass
+                face_app = FaceAnalysis(providers=face_providers, **fa_kw)
+                face_app.prepare(ctx_id=0, det_size=(face_det_size, face_det_size))
             except Exception as e:
                 self._log(f"Face model failed ({e}), using simplified mode.", "warning")
                 face_app = None
@@ -516,8 +510,9 @@ class CrossDayAnalyzerWithCallbacks:
             botsort_tracker_yaml = "botsort.yaml"
         try:
             from classroom_analysis.ocr_overlay import (
-                parse_ocr_overlay_datetime,
+                parse_date_from_video_filename,
                 read_ocr_overlay_frame,
+                scale_timestamp_coords,
             )
         except ImportError:
             def parse_ocr_overlay_datetime(text: str):
@@ -715,6 +710,14 @@ class CrossDayAnalyzerWithCallbacks:
         
         # Resize if needed
         target_w, target_h = (1280, 720) if w > 1920 else (w, h)
+        if enable_ocr_timestamp and (target_w, target_h) != (w, h):
+            timestamp_coords = scale_timestamp_coords(
+                timestamp_coords, (w, h), (target_w, target_h)
+            )
+            self._log(
+                f"OCR ROI scaled for resize {w}x{h} -> {target_w}x{target_h}: {timestamp_coords}",
+                "info",
+            )
         
         # Output video (optional - skip for faster processing)
         # mp4v can truncate long videos on Windows; use AVI/MJPG for reliability
@@ -905,14 +908,20 @@ class CrossDayAnalyzerWithCallbacks:
                     return False
             return True
 
+        # One line per (track, gallery) — avoids flooding the UI when the same reject repeats.
+        gallery_match_rejection_logged: set[tuple[int, str]] = set()
+
         def _match_track_to_gallery(track_centroid, active_gids, t_id):
             best_id, best_sim = find_match_with_margin(track_centroid, active_gids)
             if best_id and not _accept_gallery_match(best_id, track_centroid, t_id, best_sim):
-                self._log(
-                    f"Rejected gallery match {best_id} for track {t_id} "
-                    f"(sim={best_sim:.3f}; different person or weak returning match).",
-                    "warning",
-                )
+                dedupe_key = (int(t_id), str(best_id))
+                if dedupe_key not in gallery_match_rejection_logged:
+                    gallery_match_rejection_logged.add(dedupe_key)
+                    self._log(
+                        f"Rejected gallery match {best_id} for track {t_id} "
+                        f"(sim={best_sim:.3f}; different person or weak returning match).",
+                        "warning",
+                    )
                 return None, best_sim
             return best_id, best_sim
         
@@ -1003,7 +1012,8 @@ class CrossDayAnalyzerWithCallbacks:
             self._log("Using cv2.imshow preview (faster than PyQt)", "info")
         last_valid_timestamp = "00:00:00"
         _last_emit_pct = -1
-        session_date_set_from_ocr = False
+        session_date_source = None  # "ocr" | "filename" when a report date is resolved
+        last_ocr_raw_sample = ""
         executor = ThreadPoolExecutor(max_workers=2)
         try:
             while cap.isOpened():
@@ -1043,9 +1053,11 @@ class CrossDayAnalyzerWithCallbacks:
                     )
                     if ocr_t:
                         last_valid_timestamp = ocr_t
+                    if ocr_raw:
+                        last_ocr_raw_sample = ocr_raw
                     if ocr_d:
                         session_attendance_date = ocr_d
-                        session_date_set_from_ocr = True
+                        session_date_source = "ocr"
                         if RUN_MODE == "BUILD_DB" and ocr_d not in operational_dates:
                             operational_dates.append(ocr_d)
                             operational_dates.sort()
@@ -1292,6 +1304,21 @@ class CrossDayAnalyzerWithCallbacks:
                             # BUILD_DB; in EVAL_DAY with a pre-existing gallery, similarities
                             # often land in the 0.35–0.55 gray zone and would leave every
                             # track permanently unidentified (resulting in 0 detections).
+                            new_gid = f"G_{next_global_id:03d}"
+                            next_global_id += 1
+                            global_gallery[new_gid] = {
+                                "exemplars": [track_centroid],
+                                "peak_identity_sim": float(max(0.0, best_sim)),
+                            }
+                            t_data["global_id"] = new_gid
+                            active_gids_in_frame.add(new_gid)
+                            log_attendance(new_gid, timestamp)
+                            _claim_gid(new_gid, t_id, track_centroid)
+                        else:
+                            # BUILD_DB: best gallery id was rejected (e.g. track conflict) or we
+                            # are in the high-sim gray zone without a merge — must assign once,
+                            # otherwise global_id stays None and this block repeats every frame
+                            # (log spam + no progress).
                             new_gid = f"G_{next_global_id:03d}"
                             next_global_id += 1
                             global_gallery[new_gid] = {
@@ -1626,20 +1653,37 @@ class CrossDayAnalyzerWithCallbacks:
         # The internal attendance key (session_attendance_date) keeps using the
         # placeholder so the DB doesn't lose embeddings, but report-time logic
         # treats the date as unknown.
-        ocr_date_missing = bool(enable_ocr_timestamp) and not session_date_set_from_ocr
+        if enable_ocr_timestamp and session_date_source is None:
+            fn_date = parse_date_from_video_filename(os.path.basename(self.video_path))
+            if fn_date:
+                session_attendance_date = fn_date
+                session_date_source = "filename"
+                self._log(
+                    f"Session date from video filename: {fn_date} "
+                    f"(overlay OCR did not parse a date; sample OCR text: {last_ocr_raw_sample!r})",
+                    "warning",
+                )
+
+        ocr_date_missing = bool(enable_ocr_timestamp) and session_date_source is None
         if enable_ocr_timestamp:
-            if session_date_set_from_ocr:
+            if session_date_source == "ocr":
                 self._log(
                     f"Session date for report: {session_attendance_date} "
                     "(set from overlay OCR at least once).",
                     "success",
                 )
+            elif session_date_source == "filename":
+                self._log(
+                    f"Session date for report: {session_attendance_date} "
+                    "(from NVR filename; overlay OCR did not read a date).",
+                    "warning",
+                )
             else:
                 self._log(
                     "Session date for report: NULL — OCR never parsed a date from the "
-                    "video overlay. Per the improvement spec, system/config dates are "
-                    "NOT substituted. Check the timestamp ROI, video quality, or disable "
-                    "OCR if your camera does not stamp a date.",
+                    "video overlay and no YYYYMMDD segment was found in the filename. "
+                    f"Last OCR sample: {last_ocr_raw_sample!r}. "
+                    "Check timestamp ROI or camera overlay format.",
                     "warning",
                 )
         
@@ -1673,7 +1717,7 @@ class CrossDayAnalyzerWithCallbacks:
         report = {
             "Session": {
                 "date": report_session_date,
-                "date_source": "ocr" if session_date_set_from_ocr else "missing",
+                "date_source": session_date_source or "missing",
                 "camera": "Cam_01",
                 "source_video": os.path.basename(self.video_path),
                 "source_video_path": os.path.abspath(self.video_path),

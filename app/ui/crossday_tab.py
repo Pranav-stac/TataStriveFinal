@@ -422,9 +422,9 @@ class CrossDayTab(QWidget):
             "run_mode": mode,
             "current_date": datetime.now().strftime("%Y-%m-%d"),
             "day_label": day_label,
-            "t_strict_merge": crossday_config.get("t_strict_merge", 0.55),
+            "t_strict_merge": crossday_config.get("t_strict_merge", 0.45),
             "t_new_id": crossday_config.get("t_new_id", 0.35),
-            "t_ratio_margin": crossday_config.get("t_ratio_margin", 0.10),
+            "t_ratio_margin": crossday_config.get("t_ratio_margin", 0.05),
             "min_samples": crossday_config.get("min_samples", 8),
             "visitor_upgrade_days": crossday_config.get("visitor_upgrade_days", 3),
         }
