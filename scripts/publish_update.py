@@ -244,16 +244,39 @@ def fetch_previous_manifest(repo: str, token: str) -> Optional[Dict]:
     return None
 
 
+def get_release_by_tag(repo: str, token: str, version: str) -> Optional[Dict]:
+    tag = f"v{version.lstrip('v')}"
+    try:
+        return _gh_request(
+            "GET",
+            f"{GITHUB_API}/repos/{repo}/releases/tags/{tag}",
+            token,
+        )
+    except RuntimeError as exc:
+        if "404" in str(exc):
+            return None
+        raise
+
+
 def create_github_release(repo: str, token: str, version: str, changelog: str) -> Dict:
+    tag = f"v{version.lstrip('v')}"
     payload = json.dumps({
-        "tag_name":         f"v{version}",
+        "tag_name":         tag,
         "target_commitish": "main",
-        "name":             f"v{version}",
-        "body":             changelog or f"Release v{version}",
+        "name":             tag,
+        "body":             changelog or f"Release {tag}",
         "draft":            False,
         "prerelease":       False,
     }).encode("utf-8")
     return _gh_request("POST", f"{GITHUB_API}/repos/{repo}/releases", token, payload)
+
+
+def get_or_create_release(repo: str, token: str, version: str, changelog: str) -> Dict:
+    existing = get_release_by_tag(repo, token, version)
+    if existing:
+        print(f"[Publisher] Release {existing.get('html_url')} already exists — uploading assets.")
+        return existing
+    return create_github_release(repo, token, version, changelog)
 
 
 def upload_release_asset(
@@ -280,13 +303,23 @@ def upload_release_asset(
 #  Main publish workflow
 # ─────────────────────────────────────────────────────────────────────────────
 
-def publish(version: str, token: str, repo: str, changelog: str) -> None:
+def publish(
+    version: str,
+    token: str,
+    repo: str,
+    changelog: str,
+    *,
+    no_bump: bool = False,
+) -> None:
     print(f"\n{'='*60}")
     print(f"  TataStrive Publisher  --  v{version}  ->  {repo}")
     print(f"{'='*60}\n")
 
     # 1. Bump version in source files
-    bump_version_in_source(version)
+    if not no_bump:
+        bump_version_in_source(version)
+    else:
+        print("[Publisher] --no-bump: keeping __version__ in source unchanged.")
 
     # 2. Collect current tracked files
     current_files = collect_tracked_files()
@@ -331,9 +364,9 @@ def publish(version: str, token: str, repo: str, changelog: str) -> None:
     print(f"[Publisher] manifest.json  —  {len(manifest['files'])} entries, "
           f"{len(manifest_bytes)/1024:.1f} KB")
 
-    # 6. Create GitHub Release
-    print("\n[Publisher] Creating GitHub release…")
-    release    = create_github_release(repo, token, version, changelog)
+    # 6. Create GitHub Release (or attach assets to tag that already exists)
+    print("\n[Publisher] Creating / resolving GitHub release…")
+    release    = get_or_create_release(repo, token, version, changelog)
     upload_url = release["upload_url"]
     print(f"[Publisher] Release URL: {release['html_url']}")
 
@@ -378,6 +411,11 @@ def main() -> None:
         default="",
         help="Release notes / changelog text (optional)",
     )
+    parser.add_argument(
+        "--no-bump",
+        action="store_true",
+        help="Do not modify app/__init__.py (use when version already bumped in git)",
+    )
     args = parser.parse_args()
 
     if not args.token:
@@ -392,7 +430,13 @@ def main() -> None:
             "to your actual GitHub repository."
         )
 
-    publish(args.version, args.token, args.repo, args.changelog)
+    publish(
+        args.version,
+        args.token,
+        args.repo,
+        args.changelog,
+        no_bump=args.no_bump,
+    )
 
 
 if __name__ == "__main__":

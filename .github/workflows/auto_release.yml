@@ -33,6 +33,12 @@ on:
       - "scripts/**"
       - "run_app.py"
       - "requirements_app.txt"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 4.0.1). Defaults to app/__init__.py __version__"
+        required: false
+        type: string
 
 jobs:
   release:
@@ -46,10 +52,19 @@ jobs:
         with:
           fetch-depth: 2        # need previous commit to detect version change
 
-      # ── 2. Detect whether __version__ changed ──────────────────────────────
+      # ── 2. Detect whether __version__ changed (or manual workflow_dispatch) ─
       - name: Check version change
         id: version_check
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MANUAL="${{ github.event.inputs.version }}"
+            if [ -n "$MANUAL" ]; then
+              echo "current_version=$MANUAL" >> "$GITHUB_OUTPUT"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              echo "Manual release for v$MANUAL"
+              exit 0
+            fi
+          fi
           CURRENT=$(python3 -c "
           import ast, sys
           src = open('app/__init__.py').read()
@@ -106,4 +121,6 @@ jobs:
           python scripts/publish_update.py \
             --version "${{ steps.version_check.outputs.current_version }}" \
             --token   "$GITHUB_TOKEN" \
-            --repo    "$GITHUB_REPO"
+            --repo    "$GITHUB_REPO" \
+            --no-bump \
+            --changelog "Attendance OCR (multi-ROI, filename fallback); frozen onnxruntime fixes; delta patch for auto-update."
