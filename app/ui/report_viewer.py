@@ -348,9 +348,9 @@ class ReportViewer(QWidget):
         
         self.data_table.clear()
         self.data_table.setRowCount(len(people))
-        self.data_table.setColumnCount(9)
+        self.data_table.setColumnCount(10)
         self.data_table.setHorizontalHeaderLabels([
-            "ID", "Type", "Engagement ID", "Batch", "Match Confidence",
+            "ID", "Type", "Engagement ID", "Batch", "G_ID Conf", "Student Conf",
             "Entry", "Exit", "Duration", "Last 7 Days"
         ])
         
@@ -369,22 +369,30 @@ class ReportViewer(QWidget):
 
             self.data_table.setItem(row, 2, QTableWidgetItem(str(person.get("engagement_id", "") or "")))
             self.data_table.setItem(row, 3, QTableWidgetItem(str(person.get("batch", "") or "")))
-            confidence = person.get("confidence_score", 0.0)
-            try:
-                conf_text = f"{float(confidence):.3f}"
-            except (TypeError, ValueError):
-                conf_text = "0.000"
-            self.data_table.setItem(row, 4, QTableWidgetItem(conf_text))
-            
-            self.data_table.setItem(row, 5, QTableWidgetItem(person.get("entry", "")))
-            self.data_table.setItem(row, 6, QTableWidgetItem(person.get("exit", "")))
-            
+            def _fmt_conf(val) -> str:
+                if val is None:
+                    return ""
+                try:
+                    return f"{float(val):.3f}"
+                except (TypeError, ValueError):
+                    return ""
+
+            self.data_table.setItem(
+                row, 4, QTableWidgetItem(_fmt_conf(person.get("identity_confidence")))
+            )
+            self.data_table.setItem(
+                row, 5, QTableWidgetItem(_fmt_conf(person.get("student_match_confidence")))
+            )
+
+            self.data_table.setItem(row, 6, QTableWidgetItem(person.get("entry", "")))
+            self.data_table.setItem(row, 7, QTableWidgetItem(person.get("exit", "")))
+
             duration_sec = person.get("duration_sec", 0)
             hours = duration_sec // 3600
             minutes = (duration_sec % 3600) // 60
-            self.data_table.setItem(row, 7, QTableWidgetItem(f"{hours}h {minutes}m"))
-            
-            self.data_table.setItem(row, 8, QTableWidgetItem(str(person.get("present_last_7_days", 0))))
+            self.data_table.setItem(row, 8, QTableWidgetItem(f"{hours}h {minutes}m"))
+
+            self.data_table.setItem(row, 9, QTableWidgetItem(str(person.get("present_last_7_days", 0))))
             
     def _display_generic_json(self):
         """Display generic JSON data."""

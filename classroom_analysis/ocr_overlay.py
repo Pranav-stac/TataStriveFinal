@@ -36,19 +36,41 @@ def scale_timestamp_coords(
     )
 
 
-def parse_date_from_video_filename(name: str) -> Optional[str]:
+_NVR_MAIN_TS = re.compile(r"NVR_ch\d+_main_(\d{14})", re.IGNORECASE)
+
+
+def parse_nvr_session_date_from_filename(name: str) -> Tuple[Optional[str], bool]:
     """
-    Extract YYYY-MM-DD from NVR-style names, e.g. NVR_ch4_main_20260503072329.mp4.
+    NVR convention: NVR_ch4_main_20260406090147_20260406090416.mp4 → 2026-04-06
+    (date from the **first** 14-digit start timestamp, not the end segment).
     """
     if not name:
+        return None, False
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    m = _NVR_MAIN_TS.search(stem)
+    if not m:
+        return None, False
+    ts = m.group(1)
+    if len(ts) < 8:
+        return None, False
+    d_iso = _try_build_date(int(ts[0:4]), int(ts[4:6]), int(ts[6:8]))
+    return d_iso, d_iso is not None
+
+
+def parse_date_from_video_filename(name: str) -> Optional[str]:
+    """
+    Extract YYYY-MM-DD from video filename.
+    Prefers NVR_ch*_main_YYYYMMDDHHMMSS… (first timestamp segment).
+    """
+    nvr_date, is_nvr = parse_nvr_session_date_from_filename(name)
+    if is_nvr and nvr_date:
+        return nvr_date
+    if not name:
         return None
-    for m in re.finditer(r"(20\d{2})(\d{2})(\d{2})", name):
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return datetime(y, mo, d).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    return None
+    m = re.search(r"(20\d{2})(\d{2})(\d{2})", name)
+    if not m:
+        return None
+    return _try_build_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
 def _try_build_date(y: int, mo: int, d: int) -> Optional[str]:

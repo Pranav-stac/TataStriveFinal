@@ -239,7 +239,10 @@ class CrossDayAnalyzerWithCallbacks:
         from pathlib import Path
         from scipy.spatial.distance import cosine
         from ultralytics import YOLO
-        
+        import time as _time
+
+        processing_started = _time.perf_counter()
+
         self._progress(0, "Preparing attendance analysis…")
 
         from app.runtime_checks import run_crossday_preflight
@@ -511,6 +514,7 @@ class CrossDayAnalyzerWithCallbacks:
         try:
             from classroom_analysis.ocr_overlay import (
                 parse_date_from_video_filename,
+                parse_nvr_session_date_from_filename,
                 read_ocr_overlay_frame,
                 scale_timestamp_coords,
             )
@@ -819,21 +823,28 @@ class CrossDayAnalyzerWithCallbacks:
 
         def finalize_confidence_scores() -> None:
             for g_id, g_data in global_gallery.items():
-                if g_data.get("engagement_id") is not None:
-                    g_data["confidence"] = float(
-                        g_data.get("confidence")
-                        or g_data.get("peak_student_sim")
-                        or 0.0
-                    )
-                    continue
-
                 embs = _collect_identity_embeddings(g_id, g_data)
                 cohesion = _embedding_cohesion_confidence(embs)
                 peak_identity = float(g_data.get("peak_identity_sim") or 0.0)
                 peak_student = float(g_data.get("peak_student_sim") or 0.0)
-                g_data["confidence"] = float(
-                    np.clip(max(peak_student, peak_identity, cohesion), 0.0, 1.0)
+                identity_conf = float(
+                    np.clip(max(peak_identity, cohesion), 0.0, 1.0)
                 )
+                g_data["identity_confidence"] = identity_conf
+                if g_data.get("engagement_id") is not None:
+                    g_data["student_match_confidence"] = float(
+                        np.clip(peak_student, 0.0, 1.0)
+                    )
+                    g_data["confidence"] = float(
+                        g_data.get("confidence")
+                        or g_data["student_match_confidence"]
+                        or identity_conf
+                    )
+                else:
+                    g_data["student_match_confidence"] = None
+                    g_data["confidence"] = float(
+                        np.clip(max(identity_conf, peak_student), 0.0, 1.0)
+                    )
 
         def find_match_with_margin(track_emb, active_gids):
             scores = []
@@ -925,9 +936,28 @@ class CrossDayAnalyzerWithCallbacks:
                 return None, best_sim
             return best_id, best_sim
         
-        # Calendar day for attendance keys: OCR overlay when available, else config current_date.
-        session_attendance_date = CURRENT_DATE
-        ocr_session_date_announced = False
+        # Session calendar day: NVR filename date is authoritative; else OCR or config.
+        video_basename = os.path.basename(self.video_path)
+        fn_date, is_nvr_filename = parse_nvr_session_date_from_filename(video_basename)
+        if not fn_date:
+            fn_date = parse_date_from_video_filename(video_basename)
+        lock_session_date_to_filename = bool(is_nvr_filename and fn_date)
+        if lock_session_date_to_filename:
+            session_attendance_date = fn_date
+            session_date_source = "filename"
+            self._log(
+                f"Session date from NVR filename: {fn_date} "
+                f"({video_basename}; OCR date will not override)",
+                "success",
+            )
+        elif fn_date:
+            session_attendance_date = fn_date
+            session_date_source = None
+        else:
+            session_attendance_date = CURRENT_DATE
+            session_date_source = None
+        ocr_session_date_announced = lock_session_date_to_filename
+        ocr_filename_mismatch_logged = False
         # Gallery IDs touched in *this* video only — report must not repeat people from prior videos
         # when the same DB is chained across a queue (BUILD_DB / EVAL).
         ids_seen_this_video: set = set()
@@ -1012,7 +1042,6 @@ class CrossDayAnalyzerWithCallbacks:
             self._log("Using cv2.imshow preview (faster than PyQt)", "info")
         last_valid_timestamp = "00:00:00"
         _last_emit_pct = -1
-        session_date_source = None  # "ocr" | "filename" when a report date is resolved
         last_ocr_raw_sample = ""
         executor = ThreadPoolExecutor(max_workers=2)
         try:
@@ -1056,14 +1085,26 @@ class CrossDayAnalyzerWithCallbacks:
                     if ocr_raw:
                         last_ocr_raw_sample = ocr_raw
                     if ocr_d:
-                        session_attendance_date = ocr_d
-                        session_date_source = "ocr"
-                        if RUN_MODE == "BUILD_DB" and ocr_d not in operational_dates:
-                            operational_dates.append(ocr_d)
-                            operational_dates.sort()
-                        if not ocr_session_date_announced:
-                            self._log(f"OCR session date (applied): {ocr_d}", "success")
-                            ocr_session_date_announced = True
+                        if lock_session_date_to_filename:
+                            if (
+                                ocr_d != session_attendance_date
+                                and not ocr_filename_mismatch_logged
+                            ):
+                                self._log(
+                                    f"OCR read date {ocr_d} but NVR filename date "
+                                    f"{session_attendance_date} is authoritative.",
+                                    "warning",
+                                )
+                                ocr_filename_mismatch_logged = True
+                        else:
+                            session_attendance_date = ocr_d
+                            session_date_source = "ocr"
+                            if RUN_MODE == "BUILD_DB" and ocr_d not in operational_dates:
+                                operational_dates.append(ocr_d)
+                                operational_dates.sort()
+                            if not ocr_session_date_announced:
+                                self._log(f"OCR session date (applied): {ocr_d}", "success")
+                                ocr_session_date_announced = True
                 if enable_ocr_timestamp:
                     timestamp = last_valid_timestamp if last_valid_timestamp != "00:00:00" else fallback_timestamp
                 else:
@@ -1653,30 +1694,30 @@ class CrossDayAnalyzerWithCallbacks:
         # The internal attendance key (session_attendance_date) keeps using the
         # placeholder so the DB doesn't lose embeddings, but report-time logic
         # treats the date as unknown.
-        if enable_ocr_timestamp and session_date_source is None:
-            fn_date = parse_date_from_video_filename(os.path.basename(self.video_path))
-            if fn_date:
-                session_attendance_date = fn_date
-                session_date_source = "filename"
-                self._log(
-                    f"Session date from video filename: {fn_date} "
-                    f"(overlay OCR did not parse a date; sample OCR text: {last_ocr_raw_sample!r})",
-                    "warning",
-                )
+        if lock_session_date_to_filename:
+            session_date_source = "filename"
+        elif session_date_source is None and fn_date:
+            session_attendance_date = fn_date
+            session_date_source = "filename"
+            self._log(
+                f"Session date from video filename: {fn_date} "
+                f"(overlay OCR did not parse a date; sample OCR text: {last_ocr_raw_sample!r})",
+                "warning",
+            )
 
         ocr_date_missing = bool(enable_ocr_timestamp) and session_date_source is None
         if enable_ocr_timestamp:
-            if session_date_source == "ocr":
+            if session_date_source == "filename":
+                self._log(
+                    f"Session date for report: {session_attendance_date} "
+                    f"(from NVR/video filename: {video_basename}).",
+                    "success",
+                )
+            elif session_date_source == "ocr":
                 self._log(
                     f"Session date for report: {session_attendance_date} "
                     "(set from overlay OCR at least once).",
                     "success",
-                )
-            elif session_date_source == "filename":
-                self._log(
-                    f"Session date for report: {session_attendance_date} "
-                    "(from NVR filename; overlay OCR did not read a date).",
-                    "warning",
                 )
             else:
                 self._log(
@@ -1686,6 +1727,9 @@ class CrossDayAnalyzerWithCallbacks:
                     "Check timestamp ROI or camera overlay format.",
                     "warning",
                 )
+
+        processing_time_sec = round(_time.perf_counter() - processing_started, 2)
+        self._log(f"Video processing time: {processing_time_sec}s", "info")
         
         # Generate report (unique filename per run so BigQuery sync_log ≠ same basename for every video)
         self._progress(96, "Generating report...")
@@ -1719,11 +1763,12 @@ class CrossDayAnalyzerWithCallbacks:
                 "date": report_session_date,
                 "date_source": session_date_source or "missing",
                 "camera": "Cam_01",
-                "source_video": os.path.basename(self.video_path),
+                "source_video": video_basename,
                 "source_video_path": os.path.abspath(self.video_path),
                 "run_folder": run_folder,
                 "report_people_scope": "this_video_only",
-                "duration": "00:00:00"
+                "duration": "00:00:00",
+                "processing_time_sec": processing_time_sec,
             },
             "Counts": {
                 "unique_people": 0,
@@ -1796,6 +1841,16 @@ class CrossDayAnalyzerWithCallbacks:
                 attendance.keys(), session_attendance_date, current_dt
             )
 
+            identity_conf = round(
+                float(g_data.get("identity_confidence", g_data.get("peak_identity_sim", 0.0)) or 0.0),
+                4,
+            )
+            student_conf_raw = g_data.get("student_match_confidence", g_data.get("peak_student_sim"))
+            student_conf = (
+                round(float(student_conf_raw), 4)
+                if student_conf_raw is not None and g_data.get("engagement_id")
+                else None
+            )
             person_dict = {
                 "id": g_id,
                 "engagement_id": g_data.get("engagement_id"),
@@ -1803,6 +1858,8 @@ class CrossDayAnalyzerWithCallbacks:
                 "entry": entry_time,
                 "exit": exit_time,
                 "duration_sec": duration,
+                "identity_confidence": identity_conf,
+                "student_match_confidence": student_conf,
                 "confidence_score": round(float(g_data.get("confidence", 0.0) or 0.0), 4),
                 "visit_days_count": len(attendance),
                 "last_present_date": last_present_dt,

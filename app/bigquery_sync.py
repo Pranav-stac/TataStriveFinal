@@ -196,6 +196,8 @@ ATTENDANCE_SCHEMA = [
     {"name": "entry_time",         "type": "STRING",    "mode": "NULLABLE"},
     {"name": "exit_time",          "type": "STRING",    "mode": "NULLABLE"},
     {"name": "duration_seconds",   "type": "INTEGER",   "mode": "NULLABLE"},
+    {"name": "identity_confidence",      "type": "FLOAT", "mode": "NULLABLE"},
+    {"name": "student_match_confidence", "type": "FLOAT", "mode": "NULLABLE"},
     {"name": "confidence_score",   "type": "FLOAT",     "mode": "NULLABLE"},
     {"name": "present_last_7_days","type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "last_present_date",  "type": "STRING",    "mode": "NULLABLE"},
@@ -269,6 +271,10 @@ SYNC_LOG_SCHEMA = [
     {"name": "error_msg",     "type": "STRING",    "mode": "NULLABLE"},
     # Folder-listener: videos still waiting after this sync (auto-sync only; NULL for batch/manual)
     {"name": "videos_in_queue", "type": "INTEGER", "mode": "NULLABLE"},
+    # Attendance: wall-clock seconds to analyze the source video (from report Session)
+    {"name": "video_processing_sec", "type": "FLOAT", "mode": "NULLABLE"},
+    {"name": "source_video",         "type": "STRING", "mode": "NULLABLE"},
+    {"name": "session_date",         "type": "STRING", "mode": "NULLABLE"},
 ]
 
 _TABLE_INSERT_FIELDS: Dict[str, frozenset[str]] = {
@@ -649,7 +655,7 @@ class BigQuerySyncService:
                 }
                 self._prune_dedupe_center(cmap)
                 self._save_dedupe_state(state)
-                self._log_sync(path, rtype, len(rows), "ok", "", videos_in_queue)
+                self._log_sync(path, rtype, len(rows), "ok", "", videos_in_queue, data)
 
         except Exception as e:
             msg = f"{e}\n{traceback.format_exc()}"
@@ -662,7 +668,7 @@ class BigQuerySyncService:
                 rtype = self.detect_report_type(d)
             except Exception:
                 pass
-            self._log_sync(path, rtype, 0, "error", str(e)[:1000], videos_in_queue)
+            self._log_sync(path, rtype, 0, "error", str(e)[:1000], videos_in_queue, None)
 
         return result
 
@@ -724,6 +730,7 @@ class BigQuerySyncService:
             row.update({
                 "person_id": None, "person_type": None, "engagement_id": None, "batch": None, "entry_time": None,
                 "exit_time": None, "duration_seconds": None,
+                "identity_confidence": None, "student_match_confidence": None,
                 "confidence_score": None, "present_last_7_days": None, "last_present_date": None,
             })
             return [row]
@@ -749,6 +756,8 @@ class BigQuerySyncService:
                 "entry_time":          person.get("entry"),
                 "exit_time":           person.get("exit"),
                 "duration_seconds":    person.get("duration_sec"),
+                "identity_confidence":      person.get("identity_confidence"),
+                "student_match_confidence": person.get("student_match_confidence"),
                 "confidence_score":    person.get("confidence_score"),
                 "present_last_7_days": person.get("present_last_7_days"),
                 "last_present_date":   _date_only_string_field(person.get("last_present_date")),
@@ -878,9 +887,16 @@ class BigQuerySyncService:
         status: str,
         error_msg: str,
         videos_in_queue: Optional[int] = None,
+        report_data: Optional[Dict[str, Any]] = None,
     ) -> None:
         try:
             queue_depth = 0 if videos_in_queue is None else max(0, int(videos_in_queue))
+            session = (report_data or {}).get("Session") or {}
+            proc_sec = session.get("processing_time_sec")
+            try:
+                proc_sec = float(proc_sec) if proc_sec is not None else None
+            except (TypeError, ValueError):
+                proc_sec = None
             row = {
                 "center_id":     self.center_id,
                 "sync_ts":       self._now_ts(),
@@ -890,6 +906,9 @@ class BigQuerySyncService:
                 "status":        status,
                 "error_msg":     error_msg,
                 "videos_in_queue": queue_depth,
+                "video_processing_sec": proc_sec,
+                "source_video": session.get("source_video"),
+                "session_date": _date_only_string_field(session.get("date")),
             }
             self._insert_rows(SYNC_LOG_TABLE, [row])
         except Exception as e:
