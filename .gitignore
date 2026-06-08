@@ -22,3 +22,11 @@ EXPECTEDOUTPUT
 *.db
 *.sql
 scripts/bigquery_looker_views.sql
+attendance_verify
+
+*.png
+*.jpg
+*.jpeg
+*.mp3
+*.mp4
+*.avi

@@ -1,0 +1,6 @@
+# Attendance verification portal (Flask)
+-r requirements_flask_dashboard.txt
+google-api-python-client>=2.100.0
+opencv-python-headless>=4.8.0
+boto3>=1.28.0
+python-dotenv>=1.0.0

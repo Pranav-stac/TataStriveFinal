@@ -23,6 +23,7 @@ from app.ui.classroom_tab import ClassroomTab
 from app.ui.crossday_tab import CrossDayTab
 from app.ui.report_viewer import ReportViewer
 from app.ui.settings_tab import SettingsTab
+from app.ui.match_verifier_tab import MatchVerifierTab
 
 
 class MainWindow(QMainWindow):
@@ -70,11 +71,13 @@ class MainWindow(QMainWindow):
         self.classroom_tab = ClassroomTab()
         self.crossday_tab  = CrossDayTab()
         self.report_viewer = ReportViewer(config=self.config)
+        self.match_verifier = MatchVerifierTab()
         self.settings_tab = SettingsTab()
 
         self.tab_widget.addTab(self.classroom_tab, "Classroom Analysis")
         self.tab_widget.addTab(self.crossday_tab,  "Attendance only")
         self.tab_widget.addTab(self.report_viewer, "Report Viewer")
+        self.tab_widget.addTab(self.match_verifier, "Match Verifier")
 
         self._main_page_stack = QStackedWidget()
         self._main_page_stack.addWidget(self.tab_widget)

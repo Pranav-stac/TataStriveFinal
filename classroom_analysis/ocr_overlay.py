@@ -39,6 +39,43 @@ def scale_timestamp_coords(
 _NVR_MAIN_TS = re.compile(r"NVR_ch\d+_main_(\d{14})", re.IGNORECASE)
 
 
+def parse_nvr_video_start_time(name: str) -> Optional[str]:
+    """Wall-clock start time HH:MM:SS from NVR first timestamp segment."""
+    if not name:
+        return None
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    m = _NVR_MAIN_TS.search(stem)
+    if not m or len(m.group(1)) < 14:
+        return None
+    ts = m.group(1)
+    return f"{ts[8:10]}:{ts[10:12]}:{ts[12:14]}"
+
+
+def wall_clock_to_seconds(hhmmss: str) -> Optional[int]:
+    if not hhmmss:
+        return None
+    try:
+        parts = hhmmss.strip().split(":")
+        if len(parts) != 3:
+            return None
+        h, m, s = (int(p) for p in parts)
+        return h * 3600 + m * 60 + s
+    except (TypeError, ValueError):
+        return None
+
+
+def video_seek_seconds(source_video: str, entry_time: str) -> float:
+    """Seconds into the file for an attendance entry overlay time."""
+    start = parse_nvr_video_start_time(source_video)
+    if not start:
+        return 0.0
+    start_s = wall_clock_to_seconds(start)
+    entry_s = wall_clock_to_seconds(entry_time)
+    if start_s is None or entry_s is None:
+        return 0.0
+    return float(max(0, entry_s - start_s))
+
+
 def parse_nvr_session_date_from_filename(name: str) -> Tuple[Optional[str], bool]:
     """
     NVR convention: NVR_ch4_main_20260406090147_20260406090416.mp4 → 2026-04-06
