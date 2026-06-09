@@ -28,7 +28,7 @@ class ConfigManager:
         "last_db_path": "",
         "bigquery": {
             "auto_sync": True,         # Trigger daily sync automatically
-            "sync_hour": 0,            # Hour of day (UTC) to auto-sync (0 = midnight)
+            "sync_hour": 0,            # Hour of day (IST) to auto-sync (0 = midnight)
             "last_sync_date": "",      # ISO date of last successful sync
         },
         "classroom": {
@@ -58,12 +58,12 @@ class ConfigManager:
             "t_ratio_margin": 0.05,
             # With face pipeline on, wait this many frames before NF_* (gives InsightFace time to crop)
             "nf_min_frames_before_label": 12,
-            "min_samples": 8,
-            "min_embeds_for_match": 8,
-            "min_post_samples": 8,
+            "min_samples": 4,
+            "min_embeds_for_match": 4,
+            "min_post_samples": 4,
             "max_exemplars": 5,
             "t_outlier": 0.6,
-            "t_match_student": 0.40,
+            "t_match_student": 0.35,
             "t_returning_merge": 0.62,
             "t_track_conflict": 0.50,
             "visitor_upgrade_days": 3,
@@ -183,7 +183,7 @@ class ConfigManager:
             old_rev = int(cd.get("face_match_defaults_revision", 0))
         except (TypeError, ValueError):
             old_rev = 0
-        if old_rev >= 5:
+        if old_rev >= 6:
             return
 
         d = self.DEFAULT_CONFIG["crossday"]
@@ -265,8 +265,29 @@ class ConfigManager:
                     cd[key] = d[key]
                     changed = True
 
-        cd["face_match_defaults_revision"] = 5
-        if changed or old_rev < 5:
+        if old_rev < 6:
+            sample_defaults = {
+                "min_samples": 8,
+                "min_embeds_for_match": 8,
+                "min_post_samples": 8,
+            }
+            for key, old_val in sample_defaults.items():
+                try:
+                    if int(cd.get(key, d[key])) == int(old_val):
+                        cd[key] = d[key]
+                        changed = True
+                except (TypeError, ValueError):
+                    pass
+            try:
+                student_match = float(cd.get("t_match_student", d["t_match_student"]))
+            except (TypeError, ValueError):
+                student_match = float(d["t_match_student"])
+            if abs(student_match - 0.40) < 1e-6:
+                cd["t_match_student"] = d["t_match_student"]
+                changed = True
+
+        cd["face_match_defaults_revision"] = 6
+        if changed or old_rev < 6:
             self._save()
 
     def _migrate_classroom_probe_interval(self) -> None:

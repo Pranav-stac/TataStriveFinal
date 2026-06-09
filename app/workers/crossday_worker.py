@@ -276,14 +276,14 @@ class CrossDayAnalyzerWithCallbacks:
         T_NEW_ID = float(crossday_cfg.get("t_new_id", 0.35))
         T_RATIO_MARGIN = float(crossday_cfg.get("t_ratio_margin", 0.10))
         NF_MIN_FRAMES = max(5, int(crossday_cfg.get("nf_min_frames_before_label", 12)))
-        MIN_SAMPLES = max(1, int(crossday_cfg.get("min_samples", 8)))
-        MIN_EMBEDS_FOR_MATCH = max(1, int(crossday_cfg.get("min_embeds_for_match", 8)))
+        MIN_SAMPLES = max(1, int(crossday_cfg.get("min_samples", 4)))
+        MIN_EMBEDS_FOR_MATCH = max(1, int(crossday_cfg.get("min_embeds_for_match", 4)))
         MIN_EMBEDS_FOR_MATCH = min(MIN_EMBEDS_FOR_MATCH, MIN_SAMPLES)
-        MIN_POST_SAMPLES = max(1, int(crossday_cfg.get("min_post_samples", 8)))
+        MIN_POST_SAMPLES = max(1, int(crossday_cfg.get("min_post_samples", 4)))
         MAX_EXEMPLARS = 5
         T_OUTLIER = 0.6
         VISITOR_UPGRADE_DAYS = int(crossday_cfg.get("visitor_upgrade_days", 3))
-        T_MATCH_STUDENT = float(crossday_cfg.get("t_match_student", 0.40))
+        T_MATCH_STUDENT = float(crossday_cfg.get("t_match_student", 0.35))
         T_RETURNING_MERGE = float(crossday_cfg.get("t_returning_merge", 0.62))
         T_TRACK_CONFLICT = float(crossday_cfg.get("t_track_conflict", 0.50))
 
@@ -1729,7 +1729,21 @@ class CrossDayAnalyzerWithCallbacks:
                 )
 
         processing_time_sec = round(_time.perf_counter() - processing_started, 2)
-        self._log(f"Video processing time: {processing_time_sec}s", "info")
+        try:
+            video_seconds = int(round(total_frames / float(fps))) if fps else 0
+        except (TypeError, ZeroDivisionError):
+            video_seconds = 0
+        if video_seconds > 0:
+            v_h, rem = divmod(video_seconds, 3600)
+            v_m, v_s = divmod(rem, 60)
+            video_duration_str = f"{v_h:02d}:{v_m:02d}:{v_s:02d}"
+        else:
+            video_duration_str = "00:00:00"
+        self._log(
+            f"Video duration: {video_duration_str} ({video_seconds}s) | "
+            f"processing time: {processing_time_sec}s",
+            "info",
+        )
         
         # Generate report (unique filename per run so BigQuery sync_log ≠ same basename for every video)
         self._progress(96, "Generating report...")
@@ -1767,7 +1781,8 @@ class CrossDayAnalyzerWithCallbacks:
                 "source_video_path": os.path.abspath(self.video_path),
                 "run_folder": run_folder,
                 "report_people_scope": "this_video_only",
-                "duration": "00:00:00",
+                "duration": video_duration_str,
+                "duration_sec": video_seconds,
                 "processing_time_sec": processing_time_sec,
             },
             "Counts": {
@@ -1897,19 +1912,8 @@ class CrossDayAnalyzerWithCallbacks:
             report["Counts"]["visitors"] +
             report["Counts"].get("identified_students", 0)
         )
-        # Session.duration is the actual video length, not the latest exit clock
-        # time. Compute from total_frames / fps so durations are correct even when
-        # the first detected entry isn't at 00:00:00.
-        try:
-            video_seconds = int(round(total_frames / float(fps))) if fps else 0
-        except (TypeError, ZeroDivisionError):
-            video_seconds = 0
-        if video_seconds > 0:
-            v_h, rem = divmod(video_seconds, 3600)
-            v_m, v_s = divmod(rem, 60)
-            report["Session"]["duration"] = f"{v_h:02d}:{v_m:02d}:{v_s:02d}"
-            report["Session"]["duration_sec"] = video_seconds
-        else:
+        # Fallback when frame count / fps are unavailable from the container.
+        if video_seconds <= 0:
             report["Session"]["duration"] = latest_exit_time
             report["Session"]["duration_sec"] = 0
         

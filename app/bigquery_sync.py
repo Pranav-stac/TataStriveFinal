@@ -17,7 +17,7 @@ import os
 import sys
 import threading
 import traceback
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -78,6 +78,37 @@ def _date_only_string_field(value: Any) -> Optional[str]:
         return d.isoformat()
     s = str(value).strip()
     return s or None
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def sync_timestamp_iso(when: Optional[datetime] = None) -> str:
+    """Return IST (+05:30) timestamp string for BigQuery TIMESTAMP fields."""
+    ts = when or datetime.now(IST)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=IST)
+    else:
+        ts = ts.astimezone(IST)
+    return ts.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+05:30"
 
 
 def _json_safe_value(value: Any) -> Any:
@@ -182,6 +213,8 @@ ATTENDANCE_SCHEMA = [
     {"name": "source_video",       "type": "STRING",    "mode": "NULLABLE"},
     {"name": "source_video_path",  "type": "STRING",    "mode": "NULLABLE"},
     {"name": "session_duration",   "type": "STRING",    "mode": "NULLABLE"},
+    {"name": "video_duration_sec", "type": "INTEGER",   "mode": "NULLABLE"},
+    {"name": "video_processing_sec", "type": "FLOAT", "mode": "NULLABLE"},
     # Counts
     {"name": "unique_people",      "type": "INTEGER",   "mode": "NULLABLE"},
     {"name": "returning_count",    "type": "INTEGER",   "mode": "NULLABLE"},
@@ -271,9 +304,10 @@ SYNC_LOG_SCHEMA = [
     {"name": "error_msg",     "type": "STRING",    "mode": "NULLABLE"},
     # Folder-listener: videos still waiting after this sync (auto-sync only; NULL for batch/manual)
     {"name": "videos_in_queue", "type": "INTEGER", "mode": "NULLABLE"},
-    # Attendance: wall-clock seconds to analyze the source video (from report Session)
-    {"name": "video_processing_sec", "type": "FLOAT", "mode": "NULLABLE"},
-    {"name": "source_video",         "type": "STRING", "mode": "NULLABLE"},
+    # Attendance: source video length and wall-clock analysis time (from report Session)
+    {"name": "video_duration_sec",   "type": "INTEGER",   "mode": "NULLABLE"},
+    {"name": "video_processing_sec", "type": "FLOAT",     "mode": "NULLABLE"},
+    {"name": "source_video",         "type": "STRING",    "mode": "NULLABLE"},
     {"name": "session_date",         "type": "STRING", "mode": "NULLABLE"},
 ]
 
@@ -677,8 +711,8 @@ class BigQuerySyncService:
     # ------------------------------------------------------------------
 
     def _now_ts(self) -> str:
-        """Return UTC timestamp in ISO 8601 format for BigQuery TIMESTAMP fields."""
-        return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        """Return IST (+05:30) timestamp in ISO 8601 format for BigQuery TIMESTAMP fields."""
+        return sync_timestamp_iso()
 
     def _parse_report_date(self, data: Dict) -> Optional[date]:
         """Extract calendar date for BigQuery DATE column report_date (never a timestamp)."""
@@ -717,6 +751,8 @@ class BigQuerySyncService:
             "source_video":       session.get("source_video"),
             "source_video_path":  session.get("source_video_path"),
             "session_duration":   session.get("duration"),
+            "video_duration_sec": _int_or_none(session.get("duration_sec")),
+            "video_processing_sec": _float_or_none(session.get("processing_time_sec")),
             "unique_people":      counts.get("unique_people", 0),
             "returning_count":    counts.get("returning", 0),
             "visitor_count":      counts.get("visitors", 0),
@@ -892,11 +928,6 @@ class BigQuerySyncService:
         try:
             queue_depth = 0 if videos_in_queue is None else max(0, int(videos_in_queue))
             session = (report_data or {}).get("Session") or {}
-            proc_sec = session.get("processing_time_sec")
-            try:
-                proc_sec = float(proc_sec) if proc_sec is not None else None
-            except (TypeError, ValueError):
-                proc_sec = None
             row = {
                 "center_id":     self.center_id,
                 "sync_ts":       self._now_ts(),
@@ -906,7 +937,8 @@ class BigQuerySyncService:
                 "status":        status,
                 "error_msg":     error_msg,
                 "videos_in_queue": queue_depth,
-                "video_processing_sec": proc_sec,
+                "video_duration_sec": _int_or_none(session.get("duration_sec")),
+                "video_processing_sec": _float_or_none(session.get("processing_time_sec")),
                 "source_video": session.get("source_video"),
                 "session_date": _date_only_string_field(session.get("date")),
             }

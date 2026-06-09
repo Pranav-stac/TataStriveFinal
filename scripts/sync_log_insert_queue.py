@@ -4,7 +4,7 @@ Insert (or replace) rows in BigQuery sync_log only — does not touch attendance
 
 Mirrors the app behavior from main_window._on_crossday_complete:
   - videos_in_queue = crossday_tab.pending_video_queue_count() at sync time
-  - sync_ts uses the same format as BigQuerySyncService._now_ts() (naive UTC with Z suffix).
+  - sync_ts uses the same format as BigQuerySyncService._now_ts() (IST with +05:30 suffix).
   - rows_inserted = len(rows) for that report sync.
 
 **Why not DELETE?** BigQuery often rejects DELETE on sync_log when streaming inserts are
@@ -40,9 +40,11 @@ from google.cloud import bigquery  # noqa: E402
 from app.bigquery_sync import (  # noqa: E402
     BigQuerySyncService,
     DATASET_ID,
+    IST,
     PROJECT_ID,
     SYNC_LOG_TABLE,
     _creds_path,
+    sync_timestamp_iso,
 )
 from app.config import get_config  # noqa: E402
 
@@ -52,16 +54,16 @@ DEFAULT_ROWS = "4,4,3,3,2"  # sum = 16
 
 
 def _now_ts(dt: datetime) -> str:
-    """Match BigQuerySyncService._now_ts() exactly (naive UTC, ms precision, Z suffix)."""
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    """Match BigQuerySyncService._now_ts() exactly (IST, ms precision, +05:30 suffix)."""
+    return sync_timestamp_iso(dt)
 
 
 def _parse_ts_for_bq(s: str) -> datetime:
-    """Parse _now_ts() string to datetime for BigQuery TIMESTAMP query parameters."""
-    s = s.rstrip("Z")
-    if "." in s:
-        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f")
-    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
+    """Parse sync timestamp string for BigQuery TIMESTAMP query parameters."""
+    s = s.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
 
 
 def rewrite_sync_log_remove_slots(
@@ -207,7 +209,7 @@ def main() -> int:
     # Insert (replace or normal)
     n = len(queues)
     span = max(0.0, (n - 1) * args.seconds_apart)
-    base = datetime.utcnow() - timedelta(seconds=span)
+    base = datetime.now(IST) - timedelta(seconds=span)
     rows = []
     for i, (q, rc) in enumerate(zip(queues, row_counts)):
         ts = base + timedelta(seconds=i * args.seconds_apart)
