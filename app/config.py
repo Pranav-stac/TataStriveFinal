@@ -87,11 +87,6 @@ class ConfigManager:
             "preview_mode": "cv2"
         },
         "preview_enabled": False,
-        "match_verifier": {
-            # Local Google Drive Desktop path to attendance output (e.g. G:\\…\\output)
-            "google_drive_output_folder": "",
-            "auto_detect_on_open": True,
-        },
         "student_roster": {
             "last_sync_at": "",
             "roster_total": 0,
