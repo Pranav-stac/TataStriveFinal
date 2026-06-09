@@ -279,6 +279,28 @@ def get_or_create_release(repo: str, token: str, version: str, changelog: str) -
     return create_github_release(repo, token, version, changelog)
 
 
+def remove_release_assets(
+    repo: str,
+    token: str,
+    release: Dict,
+    names: set[str],
+) -> None:
+    """Delete existing release assets so re-upload does not 422 (duplicate name)."""
+    for asset in release.get("assets", []):
+        name = asset.get("name")
+        if name not in names:
+            continue
+        asset_id = asset.get("id")
+        if not asset_id:
+            continue
+        _gh_request(
+            "DELETE",
+            f"{GITHUB_API}/repos/{repo}/releases/assets/{asset_id}",
+            token,
+        )
+        print(f"[Publisher] Removed existing asset: {name}")
+
+
 def upload_release_asset(
     upload_url: str,
     token:      str,
@@ -370,7 +392,9 @@ def publish(
     upload_url = release["upload_url"]
     print(f"[Publisher] Release URL: {release['html_url']}")
 
-    # 7. Upload assets
+    # 7. Upload assets (replace any existing manifest.json / patch.zip first)
+    asset_names = {"manifest.json", "patch.zip"}
+    remove_release_assets(repo, token, release, asset_names)
     upload_release_asset(upload_url, token, "manifest.json", manifest_bytes, "application/json")
     upload_release_asset(upload_url, token, "patch.zip",     patch_bytes,    "application/zip")
 

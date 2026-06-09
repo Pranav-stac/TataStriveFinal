@@ -127,4 +127,4 @@ jobs:
             --token   "$GITHUB_TOKEN" \
             --repo    "$GITHUB_REPO" \
             --no-bump \
-            --changelog "Attendance OCR (multi-ROI, filename fallback); frozen onnxruntime fixes; delta patch for auto-update."
+            --changelog "Attendance: min_samples 4, t_match_student 0.35. BigQuery: video_duration_sec + IST sync timestamps. Delta patch for auto-update."
